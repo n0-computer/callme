@@ -1,0 +1,7 @@
+android:
+  manifest:
+    uses_permission:
+      - name: android.permission.INTERNET
+      - name: android.permission.ACCESS_NETWORK_STATE
+      - name: android.permission.CHANGE_NETWORK_STATE
+      - name: android.permission.RECORD_AUDIO

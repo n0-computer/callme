@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["callme", "callme-cli", "callme-egui", "callme-web"]
+
+[patch."https://github.com/dignifiedquire/iroh-roq.git"]
+# iroh-roq = { path = "../iroh-roq" }
+iroh-roq = { git = "https://github.com/Frando/iroh-roq.git", branch = "Frando/dev" }
+
+# this is needed for compiling to wasm
+#[patch.crates-io]
+# webrtc-util = { git = "https://github.com/Frando/webrtc.git", branch = "fix/util-feature-flags" }

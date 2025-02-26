@@ -1,0 +1,7 @@
+# we specify the profile here, because it is the only way to define
+# different settings for a single crate in a workspace.
+[profile.release]
+strip = true      # Automatically strip symbols from the binary.
+opt-level = "z"   # Optimize for size.
+lto = true
+codegen-units = 1

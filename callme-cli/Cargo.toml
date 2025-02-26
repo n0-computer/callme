@@ -1,0 +1,12 @@
+[package]
+name = "callme-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.96"
+clap = { version = "4.5.31", features = ["derive"] }
+callme = { version = "0.1.0", path = "../callme" }
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "rt"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"

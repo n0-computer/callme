@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+    <head>
+        <title>Callme</title>
+        <script src="./main.js" type="module"></script>
+        <link rel="stylesheet" href="./style.css" />
+    </head>
+
+    <body>
+        <header>
+            <h1>
+                callme
+            </h1>
+        </header>
+        <main></main>
+        <div class="spawned" style="display:none">
+            <form id="accept">
+                <h3>accept connections</h3>
+                <div>
+                    <button type="submit">accept</button>
+                </div>
+            </form>
+            <form id="connect">
+                <h3>connect to another node</h3>
+                <div class="fields">
+                    <div>
+                    <label for="node-id">node id to connect to:</label>
+                    <input name="node-id" placeholder="node id" />
+                    </div>
+                </div>
+                <div>
+                    <button type="submit">connect</button>
+                </div>
+            </form>
+            <div id="outgoing" class="connections"">
+                <h2>outgoing connections</h2>
+            </div>
+            <div id="incoming" class="connections"">
+                <h2>incoming connections</h2>
+            </div>
+        </div>
+    </body>
+</html>
