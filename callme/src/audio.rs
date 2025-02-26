@@ -96,9 +96,7 @@ fn setup_audio(
 
     // Find our output device. If the input device supports output too, use that.
     // Otherwise, use default or first in list.
-    let output_device = if let Some(_) = input_device.supported_output_configs()?.next() {
-        input_device.clone()
-    } else {
+    let output_device = {
         let device = match &opts.device {
             None => {
                 if let Some(device) = host.default_output_device() {
@@ -175,8 +173,11 @@ fn record(device: &Device, opus_producer: OpusProducer) -> Result<Stream, anyhow
             }
         }
     };
-    let stream = device.build_input_stream(&config.into(), callback, err_fn, None)?;
+    let config = cpal::StreamConfig::from(config);
+    info!("record stream config {config:?}");
+    let stream = device.build_input_stream(&config, callback, err_fn, None)?;
     stream.play()?;
+    info!("record stream started");
 
     Ok(stream)
 }
@@ -284,8 +285,11 @@ fn play(device: &Device, mut opus_consumer: OpusConsumer) -> Result<Stream, anyh
             }
         }
     };
+    let config: cpal::StreamConfig = config.into();
+    info!("play stream config {config:?}");
     let stream = device.build_output_stream(&config.into(), callback, err_fn, None)?;
     stream.play()?;
+    info!("play stream started");
 
     #[cfg(not(target_family = "wasm"))]
     std::thread::spawn(move || {
