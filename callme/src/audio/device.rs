@@ -5,7 +5,9 @@ use cpal::{
 };
 use tracing::info;
 
-use super::SAMPLE_RATE;
+use crate::audio::{DURATION_10MS, DURATION_20MS};
+
+use super::{StreamParams, SAMPLE_RATE};
 
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
@@ -106,7 +108,7 @@ pub fn find_output_device(host: &cpal::Host, output_device: Option<&str>) -> Res
     })
 }
 
-pub fn input_stream_config(device: &Device, buffer_size: usize) -> Result<StreamInfo> {
+pub fn input_stream_config(device: &Device, params: &StreamParams) -> Result<StreamInfo> {
     let mut config: Option<cpal::SupportedStreamConfig> = None;
     let mut supported_configs: Vec<_> = device
         .supported_input_configs()
@@ -114,7 +116,10 @@ pub fn input_stream_config(device: &Device, buffer_size: usize) -> Result<Stream
         .collect();
     supported_configs.sort_by(SupportedStreamConfigRange::cmp_default_heuristics);
     for supported_config in supported_configs.iter().rev() {
-        if let Some(c) = supported_config.try_with_sample_rate(SAMPLE_RATE) {
+        if supported_config.channels() != params.channel_count {
+            continue;
+        }
+        if let Some(c) = supported_config.try_with_sample_rate(params.sample_rate) {
             config = Some(c);
             break;
         }
@@ -130,14 +135,14 @@ pub fn input_stream_config(device: &Device, buffer_size: usize) -> Result<Stream
     // let channel_count = config.channels() as usize;
 
     let mut config: cpal::StreamConfig = config.into();
-    config.buffer_size = BufferSize::Fixed(buffer_size as u32);
+    config.buffer_size = BufferSize::Fixed(params.buffer_size(DURATION_20MS) as u32);
     Ok(StreamInfo {
         sample_format,
         config,
     })
 }
 
-pub fn output_stream_config(device: &Device, buffer_size: usize) -> Result<StreamInfo> {
+pub fn output_stream_config(device: &Device, params: &StreamParams) -> Result<StreamInfo> {
     let mut config: Option<cpal::SupportedStreamConfig> = None;
     let mut supported_configs: Vec<_> = device
         .supported_output_configs()
@@ -145,7 +150,10 @@ pub fn output_stream_config(device: &Device, buffer_size: usize) -> Result<Strea
         .collect();
     supported_configs.sort_by(SupportedStreamConfigRange::cmp_default_heuristics);
     for supported_config in supported_configs.iter().rev() {
-        if let Some(c) = supported_config.try_with_sample_rate(SAMPLE_RATE) {
+        if supported_config.channels() != params.channel_count {
+            continue;
+        }
+        if let Some(c) = supported_config.try_with_sample_rate(params.sample_rate) {
             config = Some(c);
             break;
         }
@@ -161,7 +169,7 @@ pub fn output_stream_config(device: &Device, buffer_size: usize) -> Result<Strea
     // let channel_count = config.channels() as usize;
 
     let mut config: cpal::StreamConfig = config.into();
-    config.buffer_size = BufferSize::Fixed(buffer_size as u32);
+    config.buffer_size = BufferSize::Fixed(params.buffer_size(DURATION_20MS) as u32);
     Ok(StreamInfo {
         sample_format,
         config,

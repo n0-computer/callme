@@ -15,9 +15,9 @@ pub use self::record::AudioRecorder;
 
 pub const SAMPLE_RATE: SampleRate = SampleRate(48_000);
 const DURATION_10MS: Duration = Duration::from_millis(10);
-const DURATION_20MS: Duration = Duration::from_millis(10);
+const DURATION_20MS: Duration = Duration::from_millis(20);
 
-pub const OPUS_STREAM_PARAMS: StreamParams = StreamParams::new(SAMPLE_RATE, 2);
+pub const OPUS_STREAM_PARAMS: StreamParams = StreamParams::new(SAMPLE_RATE, 1);
 
 #[derive(Debug)]
 pub struct AudioStreams {
@@ -76,7 +76,7 @@ pub enum OutboundAudio {
 pub enum InboundAudio {
     Opus {
         payload: Bytes,
-        skipped_samples: Option<u32>,
+        // skipped_samples: Option<u32>,
         skipped_frames: Option<u32>,
     },
 }

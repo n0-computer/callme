@@ -76,17 +76,18 @@ async fn main() -> anyhow::Result<()> {
             Command::FeedbackDirect => {
                 let (streams, _audio_state) = start_audio(Default::default())?;
                 loop {
-                    let outbound_item = streams.outbound_audio_receiver.recv().await?;
+                    let outbound_item = streams.recorder.recv().await?;
                     let inbound_item = match outbound_item {
                         audio::OutboundAudio::Opus {
                             payload,
                             sample_count: _,
                         } => audio::InboundAudio::Opus {
                             payload,
-                            skipped_samples: None,
+                            // skipped_samples: None,
+                            skipped_frames: None,
                         },
                     };
-                    streams.inbound_audio_sender.send(inbound_item).await?;
+                    streams.player.send(inbound_item).await?;
                 }
             }
         }

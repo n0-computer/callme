@@ -22,6 +22,7 @@ opus = { git = "https://github.com/DCNick3/opus-rs.git", branch = "unsafe-libopu
 ] }
 rand = "0.8"
 rb = "0.4.1"
+ringbuf = "0.4.7"
 rubato = "0.16.1"
 serde = { version = "1.0.218", features = ["derive"] }
 tokio = { version = "1.43.0", features = ["sync"] }

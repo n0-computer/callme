@@ -2,11 +2,13 @@ use anyhow::Result;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, Sample, SampleFormat};
 use fixed_resample::{FixedResampler, ResampleQuality};
-use rb::{Consumer, Producer, RbConsumer, RbProducer, RB};
+use ringbuf::traits::{Consumer as _, Producer as _, Split};
+use ringbuf::{HeapCons as Consumer, HeapProd as Producer};
 use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use std::time::{Duration, Instant};
+use tracing::{debug, error, info, trace, warn};
 
 use super::device::{find_output_device, output_stream_config};
 use super::OPUS_STREAM_PARAMS;
@@ -23,8 +25,8 @@ pub struct AudioPlayer {
 impl AudioPlayer {
     pub fn build(host: &cpal::Host, device: Option<&str>) -> Result<Self> {
         let device = find_output_device(host, device)?;
-        let params = StreamParams::new(SAMPLE_RATE, 2);
-        let stream_info = output_stream_config(&device, params.buffer_size(DURATION_10MS))?;
+        let params = OPUS_STREAM_PARAMS;
+        let stream_info = output_stream_config(&device, &params)?;
         let (sender, receiver) = async_channel::bounded(128);
         let closed = Arc::new(AtomicBool::new(false));
         std::thread::spawn(move || {
@@ -32,7 +34,7 @@ impl AudioPlayer {
                 "spawn playback worker: device={} stream_info={stream_info:?}",
                 device.name().unwrap()
             );
-            if let Err(err) = run_worker(&device, &stream_info, receiver, closed) {
+            if let Err(err) = run(&device, &stream_info, receiver, closed) {
                 error!("playback worker thread failed: {err:?}");
             }
         });
@@ -46,17 +48,15 @@ impl AudioPlayer {
     }
 }
 
-fn run_worker(
+fn run(
     device: &Device,
     stream_info: &StreamInfo,
     receiver: async_channel::Receiver<InboundAudio>,
     closed: Arc<AtomicBool>,
 ) -> Result<()> {
     let params = StreamParams::new(SAMPLE_RATE, stream_info.config.channels);
-    let buffer_size = params.buffer_size(DURATION_20MS) * 4;
-    let rb = rb::SpscRb::new(buffer_size);
-    let producer = rb.producer();
-    let consumer = rb.consumer();
+    let buffer_size = params.buffer_size(DURATION_20MS) * 16;
+    let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
     let config = &stream_info.config;
     let stream = match stream_info.sample_format {
         SampleFormat::I8 => build_output_stream::<i8>(&device, &config, consumer),
@@ -78,32 +78,61 @@ fn run_worker(
 fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Default>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    buffer_consumer: Consumer<f32>,
+    mut consumer: Consumer<f32>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
-    let mut buffer = Vec::new();
     let mut cnt = 0;
+    // let mut last_warning = Instant::now();
+    let mut fell_behind_count = 0;
     device.build_output_stream::<S, _, _>(
         config,
         move |data: &mut [S], _: &_| {
-            if cnt == 0 {
-                info!("playback stream started. len={}", data.len());
-            }
-            buffer.resize(data.len(), 0.);
-            // Read from the ring buffer, and write them to the data array
-            let written = buffer_consumer.read(&mut buffer).unwrap_or(0);
             if cnt < 5 {
-                info!("  written {written}")
-            }
-            for i in 0..written {
-                data[i] = buffer[i].to_sample();
+                info!("player-cb[{cnt}] stream started. len={}", data.len());
             }
 
-            // Data expects a certain number of samples, if we didn't get enough from above,
-            // mute anything afterwards as we're probably EoS
-            data[written..]
-                .iter_mut()
-                .for_each(|s| *s = Default::default());
-            cnt = cnt + 1;
+            let mut output_fell_behind = None;
+            for (i, sample) in data.iter_mut().enumerate() {
+                *sample = match consumer.try_pop() {
+                    Some(s) => s.to_sample(),
+                    None => {
+                        if output_fell_behind.is_none() {
+                            output_fell_behind = Some(i);
+                        }
+                        Default::default()
+                    }
+                }
+            }
+            if let Some(count) = output_fell_behind {
+                warn!(
+                    "player-cb[{cnt}] underflow: missing {} of {} (+ {fell_behind_count} previous)",
+                    data.len() - count,
+                    data.len()
+                );
+                // let now = Instant::now();
+                // if now.duration_since(last_warning) > Duration::from_secs(1) {
+                //     warn!("player-cb[{cnt}] underflow: empty after {} of {} (+ {fell_behind_count} previous)", count, data.len());
+                //     fell_behind_count = 0;
+                //     last_warning = now;
+                // }
+                fell_behind_count += 1;
+            }
+            // for i in 0..data.len() {
+            //     if let Some(sample) = consumer.try_pop() {
+            //         let sample: S = sample.to_sample();
+            //         data[i] = sample;
+            //     } else {
+
+            //         if !warned {
+            //             warn!(
+            //                 "player stream underflow: channel empty after {i} of {} samples",
+            //                 data.len()
+            //             );
+            //             warned = true;
+            //         }
+            //         data[i] = Default::default();
+            //     }
+            // }
+            cnt += 1;
         },
         |err| {
             error!("an error occurred on output stream: {}", err);
@@ -140,7 +169,7 @@ impl PlaybackWorker {
             ResampleQuality::High,
             true,
         );
-        let opus_decoder = opus::Decoder::new(SAMPLE_RATE.0, opus::Channels::Stereo).unwrap();
+        let opus_decoder = opus::Decoder::new(SAMPLE_RATE.0, opus::Channels::Mono).unwrap();
         let buffer_size = OPUS_STREAM_PARAMS.buffer_size(DURATION_20MS);
         let audio_buf = vec![0.; buffer_size];
         Self {
@@ -155,30 +184,47 @@ impl PlaybackWorker {
         }
     }
     pub fn run(mut self) -> Result<()> {
+        let mut tick = 0;
         loop {
             let Ok(frame) = self.receiver.recv_blocking() else {
                 debug!("stopping encoder thread: channel closed");
                 return Ok(());
             };
-            self.handle_incoming(frame)?;
+            // send some silence
+            if tick == 0 {
+                let silence = vec![0f32; self.params.buffer_size(Duration::from_millis(20))];
+                let n = self.producer.push_slice(&silence);
+                info!("player[{tick}] pushed {n} samples of silence");
+            }
+            self.process(tick, frame)?;
+            tick += 1;
         }
     }
 
-    pub fn handle_incoming(&mut self, frame: InboundAudio) -> Result<()> {
+    pub fn process(&mut self, tick: usize, frame: InboundAudio) -> Result<()> {
         let InboundAudio::Opus {
             payload,
-            skipped_samples: _,
             skipped_frames,
         } = frame;
 
         for _ in 0..skipped_frames.unwrap_or(0) {
-            self.opus_decoder.decode_float(&[], &mut [], false)?;
+            let n = self
+                .opus_decoder
+                .decode_float(&[], &mut self.audio_buf, false)?;
+            trace!("player[{tick}]: {n} from skipped");
+            self.process_samples(n)?;
         }
 
-        let decoded = self
+        let n = self
             .opus_decoder
             .decode_float(&payload, &mut self.audio_buf, false)?;
-        let samples = &self.audio_buf[..decoded];
+        trace!("player[{tick}]: {n} from data");
+        self.process_samples(n)?;
+        Ok(())
+    }
+
+    pub fn process_samples(&mut self, n: usize) -> Result<()> {
+        let samples = &self.audio_buf[..n];
 
         // Do nothing if there are no samples sent..
         if samples.is_empty() {
@@ -187,13 +233,30 @@ impl PlaybackWorker {
 
         // TODO: Echo cancellation.
 
+        // let n = self.producer.push_slice(samples);
+        // trace!(
+        //     "player[{tick}]: recv opus {}S {}B, pushed {}",
+        //     samples.len(),
+        //     payload.len(),
+        //     n
+        // );
+        // if n < samples.len() {
+        //     warn!(
+        //         "player worker dropping samples: channel full after {} of {}",
+        //         n,
+        //         samples.len()
+        //     );
+        // }
         self.resampler.process_interleaved(
             samples,
             |samples| {
-                let mut position = 0;
-                while let Some(written) = self.producer.write_blocking(samples.split_at(position).1)
-                {
-                    position += written;
+                let n = self.producer.push_slice(samples);
+                if n < samples.len() {
+                    warn!(
+                        "player worker dropping samples: channel full after {} of {}",
+                        n,
+                        samples.len()
+                    );
                 }
             },
             None,

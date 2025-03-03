@@ -62,37 +62,47 @@ pub async fn handle_connection(conn: Connection, audio_streams: AudioStreams) ->
     let mut recv_flow = session.new_receive_flow(flow_id).await.unwrap();
 
     let recv_fut = async move {
-        let mut last_ts = None;
+        // let mut last_ts = None;
         let mut last_seq = None;
         loop {
             let packet = recv_flow.read_rtp().await?;
             trace!(
-                "received packet len {}: {:?}",
+                "recv packet len {} seq {} ts {}",
                 packet.payload.len(),
-                packet.header
+                packet.header.sequence_number,
+                packet.header.timestamp,
             );
-            let packet_ts = packet.header.timestamp;
-            let skipped_samples = match last_ts {
-                None => None,
-                // drop old packets
-                // TODO: jitter buffer?
-                Some(last_ts) if packet_ts <= last_ts => continue,
-                Some(last_ts) => Some(packet_ts - last_ts),
-            };
-            last_ts = Some(packet_ts);
 
-            let packet_seq = packet.header.sequence_number;
+            // let packet_ts = packet.header.timestamp;
+            // let skipped_samples = match last_ts {
+            //     None => None,
+            //     // drop old packets
+            //     // TODO: jitter buffer?
+            //     Some(last_ts) if packet_ts <= last_ts => continue,
+            //     Some(last_ts) => Some(packet_ts - last_ts),
+            // };
+            // last_ts = Some(packet_ts);
+
+            let packet_seq = packet.header.sequence_number as u32;
             let skipped_frames = match last_seq {
                 None => None,
-                Some(last_seq) if packet_seq <= last_seq => continue,
-                Some(last_seq) => Some((packet_seq - last_seq) as u32),
+                Some(last_seq) => {
+                    let expected = last_seq + 1;
+                    if packet_seq < expected {
+                        continue;
+                    } else if packet_seq > expected {
+                        Some(packet_seq - expected)
+                    } else {
+                        None
+                    }
+                }
             };
             last_seq = Some(packet_seq);
 
             if let Err(err) = player
                 .send(InboundAudio::Opus {
                     payload: packet.payload,
-                    skipped_samples,
+                    // skipped_samples,
                     skipped_frames,
                 })
                 .await
@@ -126,7 +136,12 @@ pub async fn handle_connection(conn: Connection, audio_streams: AudioStreams) ->
             } = frame;
             let packets = packetizer.packetize(&payload, sample_count)?;
             for packet in packets {
-                trace!("sending {:?}", packet);
+                trace!(
+                    "send packet len {} seq {} ts {}",
+                    packet.payload.len(),
+                    packet.header.sequence_number,
+                    packet.header.timestamp,
+                );
                 send_flow.send_rtp(&packet)?;
             }
         }
