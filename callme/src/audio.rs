@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use async_channel::{Receiver, Sender};
 use bytes::{Bytes, BytesMut};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Stream};
@@ -7,15 +8,15 @@ use rtrb::Producer;
 use tracing::{debug, error, info, warn};
 
 const RECORD_BUF_SIZE: usize = 960 * 8; // 20ms at 48kHz
-const SAMPLE_RATE: u32 = 48_000;
+pub const SAMPLE_RATE: u32 = 48_000;
 
-pub type OpusProducer = async_channel::Sender<OpusPacket>;
-pub type OpusConsumer = async_channel::Receiver<OpusPacket>;
+pub type OutboundAudioReceiver = Receiver<OutboundAudio>;
+pub type InboundAudioSender = async_channel::Sender<InboundAudio>;
 
 #[derive(derive_more::Debug)]
-pub struct AudioStreams {
-    pub output_producer: OpusProducer,
-    pub input_consumer: OpusConsumer,
+pub struct MediaStreams {
+    pub outbound_audio_receiver: OutboundAudioReceiver,
+    pub inbound_audio_sender: InboundAudioSender,
 }
 
 #[derive(Debug, Clone)]
@@ -39,16 +40,16 @@ pub struct AudioState {
 // just keeping them around until drop.
 unsafe impl Send for AudioState {}
 
-pub fn start_audio(opts: Opts) -> Result<(AudioStreams, AudioState)> {
-    let (output_producer, output_consumer) = async_channel::bounded(128);
-    let (input_producer, input_consumer) = async_channel::bounded(128);
+pub fn start_audio(opts: Opts) -> Result<(MediaStreams, AudioState)> {
+    let (outbound_audio_sender, outbound_audio_receiver) = async_channel::bounded(128);
+    let (inbound_audio_sender, inbound_audio_receiver) = async_channel::bounded(128);
 
-    let audio_state =
-        setup_audio(opts, input_producer, output_consumer).expect("failed to setup audio");
+    let audio_state = setup_audio(opts, outbound_audio_sender, inbound_audio_receiver)
+        .expect("failed to setup audio");
     Ok((
-        AudioStreams {
-            output_producer,
-            input_consumer,
+        MediaStreams {
+            outbound_audio_receiver,
+            inbound_audio_sender,
         },
         audio_state,
     ))
@@ -56,8 +57,8 @@ pub fn start_audio(opts: Opts) -> Result<(AudioStreams, AudioState)> {
 
 fn setup_audio(
     opts: Opts,
-    input_producer: OpusProducer,
-    output_consumer: OpusConsumer,
+    outbound_audio_sender: Sender<OutboundAudio>,
+    inbound_audio_receiver: Receiver<InboundAudio>,
 ) -> Result<AudioState> {
     let host = cpal::default_host();
 
@@ -119,8 +120,8 @@ fn setup_audio(
 
     info!("using output device `{}`", input_device.name()?);
 
-    let input_stream = record(&input_device, input_producer).expect("record failed");
-    let output_stream = play(&output_device, output_consumer).expect("play failed");
+    let input_stream = record(&input_device, outbound_audio_sender).expect("record failed");
+    let output_stream = play(&output_device, inbound_audio_receiver).expect("play failed");
     let state = AudioState {
         input_device,
         output_device,
@@ -142,11 +143,18 @@ impl Default for Opts {
     }
 }
 
-pub enum OpusPacket {
-    Encoded(Bytes),
+pub enum OutboundAudio {
+    Opus { payload: Bytes, sample_count: u32 },
 }
 
-fn record(device: &Device, opus_producer: OpusProducer) -> Result<Stream, anyhow::Error> {
+pub enum InboundAudio {
+    Opus { payload: Bytes },
+}
+
+fn record(
+    device: &Device,
+    outbound_audio_sender: Sender<OutboundAudio>,
+) -> Result<Stream, anyhow::Error> {
     info!("Input device: {}", device.name()?);
     info!("Begin recording...");
 
@@ -166,8 +174,11 @@ fn record(device: &Device, opus_producer: OpusProducer) -> Result<Stream, anyhow
     let callback = move |data: &[i16], _context: &_| {
         // println!("rec cb: send audio {}", data.len());
         for sample in data {
-            if let Some(encoded) = encoder.push_sample(*sample) {
-                if let Err(err) = opus_producer.try_send(OpusPacket::Encoded(encoded)) {
+            if let Some((payload, sample_count)) = encoder.push_sample(*sample) {
+                if let Err(err) = outbound_audio_sender.try_send(OutboundAudio::Opus {
+                    payload,
+                    sample_count,
+                }) {
                     warn!("failed to forward encoded audio: {err}");
                 }
             }
@@ -204,9 +215,10 @@ impl OpusFramer {
             samples_per_frame,
         }
     }
-    pub fn push_sample(&mut self, sample: i16) -> Option<Bytes> {
+    pub fn push_sample(&mut self, sample: i16) -> Option<(Bytes, u32)> {
         self.samples.push(sample);
         if self.samples.len() >= self.samples_per_frame {
+            let sample_count = self.samples.len() as u32;
             let size = self
                 .encoder
                 .encode(&self.samples, &mut self.out_buf)
@@ -214,14 +226,14 @@ impl OpusFramer {
             self.samples.clear();
             let encoded = self.out_buf.split_to(size).freeze();
             self.out_buf.resize(self.samples_per_frame, 0);
-            Some(encoded)
+            Some((encoded, sample_count))
         } else {
             None
         }
     }
 }
 
-fn play(device: &Device, mut opus_consumer: OpusConsumer) -> Result<Stream, anyhow::Error> {
+fn play(device: &Device, mut receiver: Receiver<InboundAudio>) -> Result<Stream, anyhow::Error> {
     info!("Output device: {}", device.name()?);
 
     let range = cpal::SupportedBufferSize::Range { min: 960, max: 960 };
@@ -234,9 +246,6 @@ fn play(device: &Device, mut opus_consumer: OpusConsumer) -> Result<Stream, anyh
 
     info!("Begin playing...");
 
-    #[cfg(not(target_family = "wasm"))]
-    let (mut audio_producer, mut audio_consumer) = rtrb::RingBuffer::new(RECORD_BUF_SIZE);
-
     let err_fn = move |err| {
         error!("an error occurred on playback stream: {}", err);
     };
@@ -247,6 +256,8 @@ fn play(device: &Device, mut opus_consumer: OpusConsumer) -> Result<Stream, anyh
     let mut audio_buf = vec![0i16; 960 * 16];
     let mut opus_decoder = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono).unwrap();
 
+    #[cfg(not(target_family = "wasm"))]
+    let (mut audio_producer, mut audio_consumer) = rtrb::RingBuffer::new(RECORD_BUF_SIZE);
     #[cfg(target_family = "wasm")]
     let mut decode_pos = 0;
 
@@ -274,7 +285,10 @@ fn play(device: &Device, mut opus_consumer: OpusConsumer) -> Result<Stream, anyh
                 let end = decode_pos.min(audio_out.len());
                 audio_out.copy_from_slice(&audio_buf[..end]);
                 decode_pos -= end;
-                if let Ok(OpusPacket::Encoded(encoded_buf)) = opus_consumer.try_recv() {
+                if let Ok(OutboundAudio::Opus {
+                    field1: encoded_buf,
+                }) = receiver.try_recv()
+                {
                     let len = opus_decoder
                         .decode(&encoded_buf, &mut audio_buf, false)
                         .unwrap();
@@ -296,7 +310,7 @@ fn play(device: &Device, mut opus_consumer: OpusConsumer) -> Result<Stream, anyh
         decode_opus_loop(
             &mut opus_decoder,
             &mut audio_buf,
-            &mut opus_consumer,
+            &mut receiver,
             &mut audio_producer,
         );
     });
@@ -307,11 +321,14 @@ fn play(device: &Device, mut opus_consumer: OpusConsumer) -> Result<Stream, anyh
 fn decode_opus_loop(
     opus_decoder: &mut opus::Decoder,
     audio_buf: &mut Vec<i16>,
-    opus_consumer: &mut OpusConsumer,
+    opus_receiver: &mut Receiver<InboundAudio>,
     audio_producer: &mut Producer<i16>,
 ) {
     loop {
-        let Ok(OpusPacket::Encoded(encoded_buf)) = opus_consumer.recv_blocking() else {
+        let Ok(InboundAudio::Opus {
+            payload: encoded_buf,
+        }) = opus_receiver.recv_blocking()
+        else {
             debug!("stopping encoder thread: channel closed");
             break;
         };

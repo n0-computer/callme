@@ -1,11 +1,27 @@
 use anyhow::{bail, Context, Result};
 use futures_concurrency::future::TryJoin;
 use iroh::{endpoint::Connection, Endpoint, NodeId};
-use iroh_roq::{RtpPacket, Session, VarInt, ALPN};
+use iroh_roq::{
+    rtp::{
+        self,
+        codecs::opus::OpusPayloader,
+        packetizer::{new_packetizer, Packetizer},
+    },
+    Session, VarInt, ALPN,
+};
 use n0_future::TryFutureExt;
 use tracing::{trace, warn};
 
-use crate::audio::{AudioStreams, OpusPacket};
+use crate::audio::{InboundAudio, MediaStreams, OutboundAudio};
+
+/// RTP payload type
+///
+/// See https://en.wikipedia.org/wiki/RTP_payload_formats
+///
+/// We use the first number in the dynamic range. It serves no practical purpose for now.
+const RTP_PAYLOAD_TYPE: u8 = 96;
+
+const CLOCK_RATE: u32 = crate::audio::SAMPLE_RATE;
 
 pub async fn bind_endpoint() -> Result<Endpoint> {
     Endpoint::builder()
@@ -29,10 +45,10 @@ pub async fn accept(endpoint: &Endpoint) -> Result<Connection> {
     Ok(conn)
 }
 
-pub async fn handle_connection(conn: Connection, audio_streams: AudioStreams) -> Result<()> {
-    let AudioStreams {
-        output_producer,
-        input_consumer,
+pub async fn handle_connection(conn: Connection, audio_streams: MediaStreams) -> Result<()> {
+    let MediaStreams {
+        outbound_audio_receiver,
+        inbound_audio_sender,
     } = audio_streams;
     let flow_id = VarInt::from_u32(0);
     let session = Session::new(conn);
@@ -47,8 +63,10 @@ pub async fn handle_connection(conn: Connection, audio_streams: AudioStreams) ->
                 packet.payload.len(),
                 packet.header
             );
-            if let Err(err) = output_producer
-                .send(OpusPacket::Encoded(packet.payload))
+            if let Err(err) = inbound_audio_sender
+                .send(InboundAudio::Opus {
+                    payload: packet.payload,
+                })
                 .await
             {
                 warn!("forwarding opus to player failed: {err:?}");
@@ -58,22 +76,31 @@ pub async fn handle_connection(conn: Connection, audio_streams: AudioStreams) ->
         anyhow::Ok(())
     };
 
+    const MTU: usize = 1100;
+
     let send_fut = async move {
-        let mut seq = 0;
-        while let Ok(opus) = input_consumer.recv().await {
-            let OpusPacket::Encoded(payload) = opus;
-            let mut header = iroh_roq::rtp::header::Header::default();
-            header.sequence_number = seq as _;
-            // TODO: figure out what this should be
-            header.timestamp = 0;
-            // The standard format of the fixed RTP data header is used (one marker bit).
-            header.marker = true;
-
-            let packet = RtpPacket { header, payload };
-
-            trace!("sending {:?}", packet);
-            send_flow.send_rtp(&packet)?;
-            seq += 1;
+        // Synchronization source, can be used to track different sources within a rtp session
+        // Usually randomized, as we only support a single source it does not matter.
+        let ssrc = 0;
+        let sequencer = Box::new(rtp::sequence::new_random_sequencer());
+        let mut packetizer = new_packetizer(
+            MTU,
+            RTP_PAYLOAD_TYPE,
+            ssrc,
+            Box::new(OpusPayloader),
+            sequencer,
+            CLOCK_RATE,
+        );
+        while let Ok(opus) = outbound_audio_receiver.recv().await {
+            let OutboundAudio::Opus {
+                payload,
+                sample_count,
+            } = opus;
+            let packets = packetizer.packetize(&payload, sample_count)?;
+            for packet in packets {
+                trace!("sending {:?}", packet);
+                send_flow.send_rtp(&packet)?;
+            }
         }
         anyhow::Ok(())
     };

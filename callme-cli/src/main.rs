@@ -56,8 +56,14 @@ async fn main() -> anyhow::Result<()> {
         Command::FeedbackDirect => {
             let (streams, _audio_state) = start_audio(Default::default())?;
             loop {
-                let item = streams.input_consumer.recv().await?;
-                streams.output_producer.send(item).await?;
+                let outbound_item = streams.outbound_audio_receiver.recv().await?;
+                let inbound_item = match outbound_item {
+                    audio::OutboundAudio::Opus {
+                        payload,
+                        sample_count: _,
+                    } => audio::InboundAudio::Opus { payload },
+                };
+                streams.inbound_audio_sender.send(inbound_item).await?;
             }
         }
     }
