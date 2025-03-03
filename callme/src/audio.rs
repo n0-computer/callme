@@ -78,52 +78,12 @@ fn setup_audio(
 
     // Find our input device. If set in opts, find that one.
     // Otherwise, use default or first in list.
-    let input_device = {
-        let device = match &config.input_device {
-            None => {
-                if let Some(device) = host.default_input_device() {
-                    Some(device)
-                } else {
-                    host.input_devices()?.next()
-                }
-            }
-            Some(device) => host
-                .input_devices()?
-                .find(|x| x.name().map(|y| &y == device).unwrap_or(false)),
-        };
-        device.with_context(|| {
-            format!(
-                "could not find input audio device `{}`",
-                config.input_device.as_deref().unwrap_or("default")
-            )
-        })?
-    };
-
+    let input_device = find_input_device(&host, config.input_device.as_deref())?;
     info!("using input device `{}`", input_device.name()?);
 
     // Find our output device. If the input device supports output too, use that.
     // Otherwise, use default or first in list.
-    let output_device = {
-        let device = match &config.output_device {
-            None => {
-                if let Some(device) = host.default_output_device() {
-                    Some(device)
-                } else {
-                    host.output_devices()?.next()
-                }
-            }
-            Some(device) => host
-                .output_devices()?
-                .find(|x| x.name().map(|y| &y == device).unwrap_or(false)),
-        };
-        device.with_context(|| {
-            format!(
-                "could not find output audio device `{}`",
-                config.output_device.as_deref().unwrap_or("default")
-            )
-        })?
-    };
-
+    let output_device = find_output_device(&host, config.output_device.as_deref())?;
     info!("using output device `{}`", input_device.name()?);
 
     let input_stream = record(&input_device, outbound_audio_sender).expect("record failed");
@@ -135,6 +95,78 @@ fn setup_audio(
         output_stream,
     };
     Ok(state)
+}
+
+fn find_input_device(host: &cpal::Host, input_device: Option<&str>) -> Result<Device> {
+    let device = match &input_device {
+        None => {
+            // On linux, prefer "pipewire" device if it exists.
+            // On some machines, the "default" ALSA device cannot be opened multiple times,
+            // while the "pipewire" device can.
+            #[cfg(target_os = "linux")]
+            if let Some(device) = host
+                .input_devices()?
+                .find(|x| x.name().map(|y| &y == "pipewire").unwrap_or(false))
+                .or_else(|| host.default_input_device())
+            {
+                Some(device)
+            } else {
+                host.input_devices()?.next()
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            if let Some(device) = host.default_input_device() {
+                Some(device)
+            } else {
+                host.input_devices()?.next()
+            }
+        }
+        Some(device) => host
+            .input_devices()?
+            .find(|x| x.name().map(|y| &y == device).unwrap_or(false)),
+    };
+    device.with_context(|| {
+        format!(
+            "could not find input audio device `{}`",
+            input_device.unwrap_or("default")
+        )
+    })
+}
+
+fn find_output_device(host: &cpal::Host, output_device: Option<&str>) -> Result<Device> {
+    let device = match &output_device {
+        None => {
+            // On linux, prefer "pipewire" device if it exists.
+            // On some machines, the "default" ALSA device cannot be opened multiple times,
+            // while the "pipewire" device can.
+            #[cfg(target_os = "linux")]
+            if let Some(device) = host
+                .output_devices()?
+                .find(|x| x.name().map(|y| &y == "pipewire").unwrap_or(false))
+                .or_else(|| host.default_output_device())
+            {
+                Some(device)
+            } else {
+                host.output_devices()?.next()
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            if let Some(device) = host.default_output_device() {
+                Some(device)
+            } else {
+                host.output_devices()?.next()
+            }
+        }
+        Some(device) => host
+            .output_devices()?
+            .find(|x| x.name().map(|y| &y == device).unwrap_or(false)),
+    };
+    device.with_context(|| {
+        format!(
+            "could not find output audio device `{}`",
+            output_device.unwrap_or("default")
+        )
+    })
 }
 
 impl Default for AudioConfig {
@@ -182,7 +214,6 @@ fn record(
         .expect("failed to list supported audio input configs")
         .collect();
     supported_configs.sort_by(SupportedStreamConfigRange::cmp_default_heuristics);
-    info!("sorted input configs: {supported_configs:?}");
     for supported_config in supported_configs.iter().rev() {
         if supported_config.channels() != CHANNEL_COUNT as u16 {
             continue;
