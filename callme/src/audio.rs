@@ -1,14 +1,18 @@
+use std::num::NonZeroUsize;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
 use bytes::{Bytes, BytesMut};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Stream};
-use n0_future::time::Instant;
-use rtrb::Producer;
+use cpal::{Device, Sample, SampleFormat, Stream, SupportedStreamConfigRange};
+use fixed_resample::{ResamplingCons, ResamplingProd};
 use tracing::{debug, error, info, warn};
 
-const RECORD_BUF_SIZE: usize = 960 * 8; // 20ms at 48kHz
 pub const SAMPLE_RATE: u32 = 48_000;
+const SAMPLES_PER_FRAME: usize = 960; // 20ms at 48kHz
+
+const MAX_CHANNELS: usize = 2;
 
 pub type OutboundAudioReceiver = Receiver<OutboundAudio>;
 pub type InboundAudioSender = async_channel::Sender<InboundAudio>;
@@ -58,7 +62,7 @@ pub fn start_audio(opts: AudioConfig) -> Result<(MediaStreams, AudioState)> {
 }
 
 fn setup_audio(
-    opts: AudioConfig,
+    config: AudioConfig,
     outbound_audio_sender: Sender<OutboundAudio>,
     inbound_audio_receiver: Receiver<InboundAudio>,
 ) -> Result<AudioState> {
@@ -75,7 +79,7 @@ fn setup_audio(
     // Find our input device. If set in opts, find that one.
     // Otherwise, use default or first in list.
     let input_device = {
-        let device = match &opts.input_device {
+        let device = match &config.input_device {
             None => {
                 if let Some(device) = host.default_input_device() {
                     Some(device)
@@ -90,7 +94,7 @@ fn setup_audio(
         device.with_context(|| {
             format!(
                 "could not find input audio device `{}`",
-                opts.input_device.as_deref().unwrap_or("default")
+                config.input_device.as_deref().unwrap_or("default")
             )
         })?
     };
@@ -100,7 +104,7 @@ fn setup_audio(
     // Find our output device. If the input device supports output too, use that.
     // Otherwise, use default or first in list.
     let output_device = {
-        let device = match &opts.output_device {
+        let device = match &config.output_device {
             None => {
                 if let Some(device) = host.default_output_device() {
                     Some(device)
@@ -115,7 +119,7 @@ fn setup_audio(
         device.with_context(|| {
             format!(
                 "could not find output audio device `{}`",
-                opts.input_device.as_deref().unwrap_or("default")
+                config.output_device.as_deref().unwrap_or("default")
             )
         })?
     };
@@ -170,51 +174,133 @@ fn record(
     info!("Input device: {}", device.name()?);
     info!("Begin recording...");
 
-    let err_fn = move |err| {
-        eprintln!("an error occurred on stream: {}", err);
-    };
+    const CHANNEL_COUNT: usize = 1;
 
-    let range = cpal::SupportedBufferSize::Range { min: 960, max: 960 };
-    let config = cpal::SupportedStreamConfig::new(
-        1,
-        cpal::SampleRate(SAMPLE_RATE),
-        range,
-        cpal::SampleFormat::I16,
+    let mut stream_config: Option<cpal::SupportedStreamConfig> = None;
+    let mut supported_configs: Vec<_> = device
+        .supported_input_configs()
+        .expect("failed to list supported audio input configs")
+        .collect();
+    supported_configs.sort_by(SupportedStreamConfigRange::cmp_default_heuristics);
+    info!("sorted input configs: {supported_configs:?}");
+    for supported_config in supported_configs.iter().rev() {
+        if supported_config.channels() != CHANNEL_COUNT as u16 {
+            continue;
+        }
+        if let Some(config) = supported_config.try_with_sample_rate(cpal::SampleRate(SAMPLE_RATE)) {
+            stream_config = Some(config);
+            break;
+        }
+    }
+    info!("selected input config: {stream_config:?}");
+    let stream_config = stream_config.unwrap_or_else(|| {
+        device
+            .default_input_config()
+            .expect("failed to open defualt audio input config")
+    });
+    info!("final input config: {stream_config:?}");
+    let sample_format = stream_config.sample_format();
+    let stream_config: cpal::StreamConfig = stream_config.into();
+
+    let channel_count = stream_config.channels as usize;
+    assert_eq!(channel_count, CHANNEL_COUNT);
+    let (prod, mut cons) = fixed_resample::resampling_channel::<f32, MAX_CHANNELS>(
+        NonZeroUsize::new(channel_count).unwrap(),
+        stream_config.sample_rate.0,
+        SAMPLE_RATE,
+        Default::default(),
     );
-    let mut encoder = OpusFramer::new();
 
-    let callback = move |data: &[i16], _context: &_| {
-        // println!("rec cb: send audio {}", data.len());
-        for sample in data {
-            if let Some((payload, sample_count)) = encoder.push_sample(*sample) {
-                if let Err(err) = outbound_audio_sender.try_send(OutboundAudio::Opus {
-                    payload,
-                    sample_count,
-                }) {
-                    warn!("failed to forward encoded audio: {err}");
+    std::thread::spawn(move || {
+        let mut encoder = OpusFramer::new();
+        let mut buf = vec![0f32; SAMPLES_PER_FRAME];
+        loop {
+            std::thread::sleep(Duration::from_millis(5));
+            let available = cons.available_frames();
+            let len = available.min(SAMPLES_PER_FRAME);
+            if len == 0 {
+                continue;
+            };
+            let _ = cons.read_interleaved(&mut buf[..len]);
+            for sample in &buf[..len] {
+                if let Some((payload, sample_count)) = encoder.push_sample(*sample) {
+                    if let Err(err) = outbound_audio_sender.try_send(OutboundAudio::Opus {
+                        payload,
+                        sample_count,
+                    }) {
+                        match err {
+                            async_channel::TrySendError::Full(_) => {
+                                warn!("failed to forward encoded audio: {err}");
+                            }
+                            async_channel::TrySendError::Closed(_) => {
+                                info!("closing audio input thread: input receiver closed.");
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
-    };
-    let config = cpal::StreamConfig::from(config);
-    info!("record stream config {config:?}");
-    let stream = device.build_input_stream(&config, callback, err_fn, None)?;
+    });
+
+    info!("record stream config {stream_config:?}");
+    let stream = match sample_format {
+        SampleFormat::I8 => build_input_stream::<i8>(&device, &stream_config, prod),
+        SampleFormat::I16 => build_input_stream::<i16>(&device, &stream_config, prod),
+        SampleFormat::I32 => build_input_stream::<i32>(&device, &stream_config, prod),
+        SampleFormat::F32 => build_input_stream::<f32>(&device, &stream_config, prod),
+        sample_format => {
+            tracing::error!("Unsupported sample format '{sample_format}'");
+            Err(cpal::BuildStreamError::StreamConfigNotSupported)
+        }
+    }?;
+    // let stream = build_resampled_input_stream(device, config, prod)
     stream.play()?;
     info!("record stream started");
 
     Ok(stream)
 }
 
+fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    mut prod: ResamplingProd<f32, MAX_CHANNELS>,
+) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    let channel_count = config.channels as usize;
+    let mut buf = vec![0f32; SAMPLES_PER_FRAME];
+    device.build_input_stream::<S, _, _>(
+        config,
+        move |data: &[S], _: &_| {
+            let len = data.len();
+            if len > buf.len() {
+                buf.resize(len, 0f32);
+            }
+            for (i, sample) in data.iter().enumerate() {
+                buf[i] = sample.to_sample();
+            }
+            let pushed_frames = prod.push_interleaved(&buf[..len]);
+
+            if pushed_frames * channel_count < len {
+                warn!("audio input fell behind");
+            }
+        },
+        |err| {
+            error!("an error occurred on stream: {}", err);
+        },
+        None,
+    )
+}
+
 pub struct OpusFramer {
     encoder: opus::Encoder,
-    samples: Vec<i16>,
+    samples: Vec<f32>,
     out_buf: BytesMut,
     samples_per_frame: usize,
 }
 
 impl OpusFramer {
     pub fn new() -> Self {
-        let samples_per_frame = 960; // 20ms at 48000Hz sample rate
+        let samples_per_frame = SAMPLES_PER_FRAME as usize;
         let encoder =
             opus::Encoder::new(SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip).unwrap();
         let mut out_buf = BytesMut::new();
@@ -227,13 +313,14 @@ impl OpusFramer {
             samples_per_frame,
         }
     }
-    pub fn push_sample(&mut self, sample: i16) -> Option<(Bytes, u32)> {
+
+    pub fn push_sample(&mut self, sample: f32) -> Option<(Bytes, u32)> {
         self.samples.push(sample);
         if self.samples.len() >= self.samples_per_frame {
             let sample_count = self.samples.len() as u32;
             let size = self
                 .encoder
-                .encode(&self.samples, &mut self.out_buf)
+                .encode_float(&self.samples, &mut self.out_buf)
                 .expect("failed to encode");
             self.samples.clear();
             let encoded = self.out_buf.split_to(size).freeze();
@@ -245,97 +332,99 @@ impl OpusFramer {
     }
 }
 
-fn play(device: &Device, mut receiver: Receiver<InboundAudio>) -> Result<Stream, anyhow::Error> {
+fn play(device: &Device, receiver: Receiver<InboundAudio>) -> Result<Stream, anyhow::Error> {
     info!("Output device: {}", device.name()?);
 
-    let range = cpal::SupportedBufferSize::Range { min: 960, max: 960 };
-    let config = cpal::SupportedStreamConfig::new(
-        1,
-        cpal::SampleRate(SAMPLE_RATE),
-        range,
-        cpal::SampleFormat::I16,
-    );
-
     info!("Begin playing...");
+    const CHANNEL_COUNT: usize = 1;
 
-    let err_fn = move |err| {
-        error!("an error occurred on playback stream: {}", err);
-    };
-
-    let mut last_underflow = Instant::now();
-    let mut underflow_count = 0;
-
-    let mut audio_buf = vec![0i16; 960 * 16];
-    let mut opus_decoder = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono).unwrap();
-
-    #[cfg(not(target_family = "wasm"))]
-    let (mut audio_producer, mut audio_consumer) = rtrb::RingBuffer::new(RECORD_BUF_SIZE);
-    #[cfg(target_family = "wasm")]
-    let mut decode_pos = 0;
-
-    let callback = move |audio_out: &mut [i16], _: &cpal::OutputCallbackInfo| {
-        // on non-wasm targets, we keep the decoding to a separate thread with a ringbuffer
-        // to communicate into the audio callback.
-        #[cfg(not(target_family = "wasm"))]
-        for i in 0..audio_out.len() {
-            let Ok(val) = audio_consumer.pop() else {
-                let now = Instant::now();
-                underflow_count += 1;
-                if last_underflow.duration_since(now) > n0_future::time::Duration::from_secs(2) {
-                    warn!("play buffer underflow {underflow_count}",);
-                }
-                last_underflow = now;
-                return;
-            };
-            audio_out[i] = val;
+    let mut stream_config = None;
+    let mut supported_configs: Vec<_> = device
+        .supported_input_configs()
+        .expect("failed to list supported audio input configs")
+        .collect();
+    supported_configs.sort_by(SupportedStreamConfigRange::cmp_default_heuristics);
+    for supported_config in supported_configs.iter().rev() {
+        if supported_config.channels() != CHANNEL_COUNT as u16 {
+            continue;
         }
-
-        // on wasm we cannot spawn threads, therefore we decode right within the callback.
-        #[cfg(target_family = "wasm")]
-        {
-            while decode_pos > 0 {
-                let end = decode_pos.min(audio_out.len());
-                audio_out.copy_from_slice(&audio_buf[..end]);
-                decode_pos -= end;
-                if let Ok(OutboundAudio::Opus {
-                    field1: encoded_buf,
-                }) = receiver.try_recv()
-                {
-                    let len = opus_decoder
-                        .decode(&encoded_buf, &mut audio_buf, false)
-                        .unwrap();
-                    decode_pos += len;
-                } else {
-                    return;
-                }
-            }
+        if let Some(config) = supported_config.try_with_sample_rate(cpal::SampleRate(SAMPLE_RATE)) {
+            stream_config = Some(config);
+            break;
         }
-    };
-    let config: cpal::StreamConfig = config.into();
+    }
+    info!("selected output config: {stream_config:?}");
+    let stream_config = stream_config.unwrap_or_else(|| {
+        device
+            .default_input_config()
+            .expect("failed to open defualt audio input config")
+    });
+    info!("final output config: {stream_config:?}");
+    let sample_format = stream_config.sample_format();
+    let channel_count = stream_config.channels() as usize;
+    let config: cpal::StreamConfig = stream_config.into();
+
+    let (prod, cons) = fixed_resample::resampling_channel::<f32, MAX_CHANNELS>(
+        NonZeroUsize::new(channel_count).unwrap(),
+        SAMPLE_RATE,
+        config.sample_rate.0,
+        Default::default(),
+    );
     info!("play stream config {config:?}");
-    let stream = device.build_output_stream(&config.into(), callback, err_fn, None)?;
+    let stream = match sample_format {
+        SampleFormat::I8 => build_output_stream::<i8>(&device, &config, cons),
+        SampleFormat::I16 => build_output_stream::<i16>(&device, &config, cons),
+        SampleFormat::I32 => build_output_stream::<i32>(&device, &config, cons),
+        SampleFormat::F32 => build_output_stream::<f32>(&device, &config, cons),
+        sample_format => {
+            tracing::error!("Unsupported sample format '{sample_format}'");
+            Err(cpal::BuildStreamError::StreamConfigNotSupported)
+        }
+    }?;
+    // let stream = device.build_output_stream(&config.into(), data_fn, err_fn, None)?;
     stream.play()?;
     info!("play stream started");
 
-    #[cfg(not(target_family = "wasm"))]
     std::thread::spawn(move || {
-        decode_opus_loop(
-            &mut opus_decoder,
-            &mut audio_buf,
-            &mut receiver,
-            &mut audio_producer,
-        );
+        decode_opus_loop(receiver, prod);
     });
     Ok(stream)
 }
 
-#[cfg(not(target_family = "wasm"))]
+fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    mut cons: ResamplingCons<f32>,
+) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    let mut tmp_buffer = vec![0f32; SAMPLES_PER_FRAME * 16];
+    device.build_output_stream::<S, _, _>(
+        config,
+        move |data: &mut [S], _: &_| {
+            let len = data.len();
+            tmp_buffer.resize(len, 0f32);
+            let status = cons.read_interleaved(&mut tmp_buffer[..len]);
+
+            if let fixed_resample::ReadStatus::Underflow { .. } = status {
+                tracing::warn!("output callback fell behind");
+            }
+
+            for i in 0..len {
+                data[i] = tmp_buffer[i].to_sample();
+            }
+        },
+        |err| {
+            error!("an error occurred on output stream: {}", err);
+        },
+        None,
+    )
+}
+
 fn decode_opus_loop(
-    opus_decoder: &mut opus::Decoder,
-    audio_buf: &mut Vec<i16>,
-    opus_receiver: &mut Receiver<InboundAudio>,
-    audio_producer: &mut Producer<i16>,
+    opus_receiver: Receiver<InboundAudio>,
+    mut prod: fixed_resample::ResamplingProd<f32, MAX_CHANNELS>,
 ) {
+    let mut audio_buf = vec![0f32; 960 * 16];
+    let mut opus_decoder = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono).unwrap();
     loop {
         let Ok(InboundAudio::Opus {
             payload: encoded_buf,
@@ -346,16 +435,12 @@ fn decode_opus_loop(
             break;
         };
         // println!("deco: recv paket {}", encoded_buf.len());
-        let len = opus_decoder.decode(&encoded_buf, audio_buf, false).unwrap();
-        let mut fail = 0;
-        for i in 0..len {
-            if let Err(_err) = audio_producer.push(audio_buf[i]) {
-                fail = i;
-                break;
-            }
-        }
-        if fail > 0 {
-            warn!("failed to push sample {fail} of {len}");
+        let len = opus_decoder
+            .decode_float(&encoded_buf, &mut audio_buf, false)
+            .unwrap();
+        let pushed = prod.push_interleaved(&audio_buf[..len]);
+        if pushed < len {
+            tracing::warn!("output decoder fell behind by {} samples", len - pushed);
         }
     }
 }

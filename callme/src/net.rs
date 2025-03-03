@@ -1,6 +1,8 @@
+use std::str::FromStr;
+
 use anyhow::{bail, Context, Result};
 use futures_concurrency::future::TryJoin;
-use iroh::{endpoint::Connection, Endpoint, NodeAddr};
+use iroh::{endpoint::Connection, Endpoint, NodeAddr, SecretKey};
 use iroh_roq::{
     rtp::{
         self,
@@ -24,7 +26,14 @@ const RTP_PAYLOAD_TYPE: u8 = 96;
 const CLOCK_RATE: u32 = crate::audio::SAMPLE_RATE;
 
 pub async fn bind_endpoint() -> Result<Endpoint> {
+    let secret_key = match std::env::var("IROH_SECRET") {
+        Ok(secret) => {
+            SecretKey::from_str(&secret).expect("failed to parse secret key from IROH_SECRET")
+        }
+        Err(_) => SecretKey::generate(&mut rand::rngs::OsRng),
+    };
     Endpoint::builder()
+        .secret_key(secret_key)
         .discovery_n0()
         .alpns(vec![ALPN.to_vec()])
         .bind()

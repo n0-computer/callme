@@ -8,7 +8,9 @@ anyhow = "1.0.96"
 async-channel = "2.3.1"
 bytes = "1.10.0"
 cpal = { version = "0.15.3" }
+dasp_sample = "0.11.0"
 derive_more = { version = "2.0.1", features = ["debug"] }
+fixed-resample = "0.6.1"
 futures-concurrency = "7.6.3"
 futures-util = "0.3.31"
 iroh = { version = "0.33.0", default-features = false }
@@ -18,8 +20,7 @@ n0-future = "0.1.2"
 opus = { git = "https://github.com/DCNick3/opus-rs.git", branch = "unsafe-libopus", default-features = false, features = [
     "unsafe-libopus-backend",
 ] }
-ringbuf = "0.4.7"
-rtrb = "0.3.2"
+rand = "0.8"
 serde = { version = "1.0.218", features = ["derive"] }
 tokio = { version = "1.43.0", features = ["sync"] }
 tracing = "0.1.41"

@@ -33,7 +33,9 @@ pub async fn accept(
     info!("accepted connection from {}", node_id.fmt_short());
     send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
     let (audio_streams, audio_state) = start_audio(audio_config)?;
-    net::handle_connection(conn, audio_streams).await?;
+    if let Err(err) = net::handle_connection(conn, audio_streams).await {
+        tracing::warn!("connection closed: {err:?}");
+    }
     send(event_tx.as_ref(), NetEvent::Closed(node_id)).await;
     drop(audio_state);
     Ok(())
