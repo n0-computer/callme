@@ -14,7 +14,7 @@ use iroh_roq::{
 use n0_future::TryFutureExt;
 use tracing::{trace, warn};
 
-use crate::audio::{InboundAudio, MediaStreams, OutboundAudio};
+use crate::audio::{AudioStreams, InboundAudio, OutboundAudio};
 
 /// RTP payload type
 ///
@@ -23,7 +23,7 @@ use crate::audio::{InboundAudio, MediaStreams, OutboundAudio};
 /// We use the first number in the dynamic range. It serves no practical purpose for now.
 const RTP_PAYLOAD_TYPE: u8 = 96;
 
-const CLOCK_RATE: u32 = crate::audio::SAMPLE_RATE;
+const CLOCK_RATE: u32 = crate::audio::SAMPLE_RATE.0;
 
 pub async fn bind_endpoint() -> Result<Endpoint> {
     let secret_key = match std::env::var("IROH_SECRET") {
@@ -54,11 +54,8 @@ pub async fn accept(endpoint: &Endpoint) -> Result<Connection> {
     Ok(conn)
 }
 
-pub async fn handle_connection(conn: Connection, audio_streams: MediaStreams) -> Result<()> {
-    let MediaStreams {
-        outbound_audio_receiver,
-        inbound_audio_sender,
-    } = audio_streams;
+pub async fn handle_connection(conn: Connection, audio_streams: AudioStreams) -> Result<()> {
+    let AudioStreams { player, recorder } = audio_streams;
     let flow_id = VarInt::from_u32(0);
     let session = Session::new(conn);
     let send_flow = session.new_send_flow(flow_id).await.unwrap();
@@ -66,6 +63,7 @@ pub async fn handle_connection(conn: Connection, audio_streams: MediaStreams) ->
 
     let recv_fut = async move {
         let mut last_ts = None;
+        let mut last_seq = None;
         loop {
             let packet = recv_flow.read_rtp().await?;
             trace!(
@@ -82,10 +80,20 @@ pub async fn handle_connection(conn: Connection, audio_streams: MediaStreams) ->
                 Some(last_ts) => Some(packet_ts - last_ts),
             };
             last_ts = Some(packet_ts);
-            if let Err(err) = inbound_audio_sender
+
+            let packet_seq = packet.header.sequence_number;
+            let skipped_frames = match last_seq {
+                None => None,
+                Some(last_seq) if packet_seq <= last_seq => continue,
+                Some(last_seq) => Some((packet_seq - last_seq) as u32),
+            };
+            last_seq = Some(packet_seq);
+
+            if let Err(err) = player
                 .send(InboundAudio::Opus {
                     payload: packet.payload,
                     skipped_samples,
+                    skipped_frames,
                 })
                 .await
             {
@@ -111,11 +119,11 @@ pub async fn handle_connection(conn: Connection, audio_streams: MediaStreams) ->
             sequencer,
             CLOCK_RATE,
         );
-        while let Ok(opus) = outbound_audio_receiver.recv().await {
+        while let Ok(frame) = recorder.recv().await {
             let OutboundAudio::Opus {
                 payload,
                 sample_count,
-            } = opus;
+            } = frame;
             let packets = packetizer.packetize(&payload, sample_count)?;
             for packet in packets {
                 trace!("sending {:?}", packet);

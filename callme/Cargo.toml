@@ -21,9 +21,12 @@ opus = { git = "https://github.com/DCNick3/opus-rs.git", branch = "unsafe-libopu
     "unsafe-libopus-backend",
 ] }
 rand = "0.8"
+rb = "0.4.1"
+rubato = "0.16.1"
 serde = { version = "1.0.218", features = ["derive"] }
 tokio = { version = "1.43.0", features = ["sync"] }
 tracing = "0.1.41"
+webrtc-audio-processing = { version = "0.4.0", features = ["bundled", "derive_serde"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 cpal = { version = "0.15.3", features = ["oboe-shared-stdcxx"] }
