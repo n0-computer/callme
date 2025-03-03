@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         output_device: args.output_device,
     };
     let ep = net::bind_endpoint().await?;
-    let ep2 = ep.clone();
+    // let ep2 = ep.clone();
     let fut = async move {
         match args.command {
             Command::Accept => {
@@ -93,12 +93,13 @@ async fn main() -> anyhow::Result<()> {
         anyhow::Ok(())
     };
 
-    tokio::select! {
-        res = fut => res?,
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("shutting down");
-            ep2.close().await;
-        }
-    }
+    fut.await?;
+    // tokio::select! {
+    //     res = fut => res?,
+    //     _ = tokio::signal::ctrl_c() => {
+    //         tracing::info!("shutting down");
+    //         ep2.close().await;
+    //     }
+    // }
     Ok(())
 }
