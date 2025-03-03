@@ -20,9 +20,11 @@ pub struct MediaStreams {
 }
 
 #[derive(Debug, Clone)]
-pub struct Opts {
-    /// The audio device to use
-    pub device: Option<String>,
+pub struct AudioConfig {
+    /// The input device to use.
+    pub input_device: Option<String>,
+    /// The output device to use.
+    pub output_device: Option<String>,
 }
 
 /// Stores the CPAL devices and streams.
@@ -40,7 +42,7 @@ pub struct AudioState {
 // just keeping them around until drop.
 unsafe impl Send for AudioState {}
 
-pub fn start_audio(opts: Opts) -> Result<(MediaStreams, AudioState)> {
+pub fn start_audio(opts: AudioConfig) -> Result<(MediaStreams, AudioState)> {
     let (outbound_audio_sender, outbound_audio_receiver) = async_channel::bounded(128);
     let (inbound_audio_sender, inbound_audio_receiver) = async_channel::bounded(128);
 
@@ -56,7 +58,7 @@ pub fn start_audio(opts: Opts) -> Result<(MediaStreams, AudioState)> {
 }
 
 fn setup_audio(
-    opts: Opts,
+    opts: AudioConfig,
     outbound_audio_sender: Sender<OutboundAudio>,
     inbound_audio_receiver: Receiver<InboundAudio>,
 ) -> Result<AudioState> {
@@ -73,7 +75,7 @@ fn setup_audio(
     // Find our input device. If set in opts, find that one.
     // Otherwise, use default or first in list.
     let input_device = {
-        let device = match &opts.device {
+        let device = match &opts.input_device {
             None => {
                 if let Some(device) = host.default_input_device() {
                     Some(device)
@@ -88,7 +90,7 @@ fn setup_audio(
         device.with_context(|| {
             format!(
                 "could not find input audio device `{}`",
-                opts.device.as_deref().unwrap_or("default")
+                opts.input_device.as_deref().unwrap_or("default")
             )
         })?
     };
@@ -98,7 +100,7 @@ fn setup_audio(
     // Find our output device. If the input device supports output too, use that.
     // Otherwise, use default or first in list.
     let output_device = {
-        let device = match &opts.device {
+        let device = match &opts.output_device {
             None => {
                 if let Some(device) = host.default_output_device() {
                     Some(device)
@@ -113,7 +115,7 @@ fn setup_audio(
         device.with_context(|| {
             format!(
                 "could not find output audio device `{}`",
-                opts.device.as_deref().unwrap_or("default")
+                opts.input_device.as_deref().unwrap_or("default")
             )
         })?
     };
@@ -131,15 +133,22 @@ fn setup_audio(
     Ok(state)
 }
 
-impl Default for Opts {
+impl Default for AudioConfig {
     fn default() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        let device = std::env::var("CALLME_DEVICE").ok();
-
+        let input_device = std::env::var("CALLME_INPUT_DEVICE").ok();
         #[cfg(target_arch = "wasm32")]
-        let device = None;
+        let input_device = None;
 
-        Self { device }
+        #[cfg(not(target_arch = "wasm32"))]
+        let output_device = std::env::var("CALLME_OUTPUT_DEVICE").ok();
+        #[cfg(target_arch = "wasm32")]
+        let output_device = None;
+
+        Self {
+            input_device,
+            output_device,
+        }
     }
 }
 
@@ -148,7 +157,10 @@ pub enum OutboundAudio {
 }
 
 pub enum InboundAudio {
-    Opus { payload: Bytes },
+    Opus {
+        payload: Bytes,
+        skipped_samples: Option<u32>,
+    },
 }
 
 fn record(
@@ -202,7 +214,7 @@ pub struct OpusFramer {
 
 impl OpusFramer {
     pub fn new() -> Self {
-        let samples_per_frame = 960;
+        let samples_per_frame = 960; // 20ms at 48000Hz sample rate
         let encoder =
             opus::Encoder::new(SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip).unwrap();
         let mut out_buf = BytesMut::new();
@@ -327,6 +339,7 @@ fn decode_opus_loop(
     loop {
         let Ok(InboundAudio::Opus {
             payload: encoded_buf,
+            skipped_samples: _,
         }) = opus_receiver.recv_blocking()
         else {
             debug!("stopping encoder thread: channel closed");

@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::Result;
 use iroh::{Endpoint, NodeId};
 use iroh_roq::ALPN;
@@ -7,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::{
-    audio,
-    net::{self, handle_connection},
+    audio::{start_audio, AudioConfig},
+    net,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,15 +25,15 @@ async fn send<T>(event_tx: Option<&async_channel::Sender<T>>, event: T) {
 
 pub async fn accept(
     ep: &Endpoint,
-    audio_opts: audio::Opts,
+    audio_config: AudioConfig,
     event_tx: Option<async_channel::Sender<NetEvent>>,
 ) -> Result<()> {
     let conn = net::accept(ep).await?;
     let node_id = conn.remote_node_id()?;
     info!("accepted connection from {}", node_id.fmt_short());
     send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
-    let (opus_streams, audio_state) = audio::start_audio(audio_opts)?;
-    handle_connection(conn, opus_streams).await?;
+    let (audio_streams, audio_state) = start_audio(audio_config)?;
+    net::handle_connection(conn, audio_streams).await?;
     send(event_tx.as_ref(), NetEvent::Closed(node_id)).await;
     drop(audio_state);
     Ok(())
@@ -43,7 +41,7 @@ pub async fn accept(
 
 pub async fn connect(
     ep: &Endpoint,
-    audio_opts: audio::Opts,
+    audio_config: AudioConfig,
     node_id: NodeId,
     event_tx: Option<async_channel::Sender<NetEvent>>,
 ) -> Result<()> {
@@ -53,44 +51,43 @@ pub async fn connect(
         "established connection to {}",
         conn.remote_node_id()?.fmt_short()
     );
-    let (opus_streams, audio_state) = audio::start_audio(audio_opts)?;
-    handle_connection(conn, opus_streams).await?;
+    let (audio_streams, audio_state) = start_audio(audio_config)?;
+    net::handle_connection(conn, audio_streams).await?;
     send(event_tx.as_ref(), NetEvent::Closed(node_id)).await;
     drop(audio_state);
     Ok(())
 }
 
-pub async fn feedback(ep1: Endpoint, audio_opts: audio::Opts) -> anyhow::Result<()> {
+pub async fn feedback(
+    ep1: Endpoint,
+    audio_config: AudioConfig,
+    audio_config_2: AudioConfig,
+) -> anyhow::Result<()> {
     ep1.home_relay().initialized().await?;
-    println!("ep 1 spawned, node id {}", ep1.node_id().fmt_short());
+    println!("Endpoint 1 spawned, node id {}", ep1.node_id().fmt_short());
     let ep2 = Endpoint::builder()
-        .discovery_n0()
         .alpns(vec![ALPN.to_vec()])
         .bind()
         .await?;
-    ep2.home_relay().initialized().await?;
-    println!("ep 2 spawned, node id {}", ep1.node_id().fmt_short());
+    println!("Endpoint 2 spawned, node id {}", ep2.node_id().fmt_short());
+    let ep1_addr = ep1.node_addr().await?;
 
-    n0_future::time::sleep(Duration::from_secs(3)).await;
-
-    let (opus_streams1, audio_state1) = audio::start_audio(audio_opts.clone())?;
-    let (opus_streams2, audio_state2) = audio::start_audio(audio_opts)?;
-
-    let ep1_node_id = ep1.node_id();
     let accept_task = n0_future::task::spawn(async move {
         let conn = net::accept(&ep1).await?;
-        net::handle_connection(conn, opus_streams1).await?;
+        let (audio_streams, audio_state) = start_audio(audio_config)?;
+        net::handle_connection(conn, audio_streams).await?;
+        drop(audio_state);
         anyhow::Ok(())
     });
     let connect_task = n0_future::task::spawn(async move {
-        let conn = net::connect(&ep2, ep1_node_id).await?;
-        net::handle_connection(conn, opus_streams2).await?;
+        let conn = net::connect(&ep2, ep1_addr).await?;
+        let (audio_streams, audio_state) = start_audio(audio_config_2)?;
+        net::handle_connection(conn, audio_streams).await?;
+        drop(audio_state);
         anyhow::Ok(())
     });
 
     accept_task.await??;
     connect_task.await??;
-    drop(audio_state1);
-    drop(audio_state2);
     Ok(())
 }

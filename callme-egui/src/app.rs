@@ -164,14 +164,14 @@ impl Worker {
             .await?;
         self.log(format!("our node id: {}", ep.node_id().fmt_short()))
             .await;
-        let audio_opts = callme::audio::Opts::default();
+        let audio_config = callme::audio::AudioConfig::default();
         let (accept_event_tx, accept_event_rx) = async_channel::bounded(16);
         let (connect_event_tx, connect_event_rx) = async_channel::bounded(16);
         let accept_task = n0_future::task::spawn({
             let ep = ep.clone();
-            let audio_opts = audio_opts.clone();
+            let audio_config = audio_config.clone();
             async move {
-                let res = callme::run::accept(&ep, audio_opts, Some(accept_event_tx)).await;
+                let res = callme::run::accept(&ep, audio_config, Some(accept_event_tx)).await;
                 if let Err(err) = &res {
                     tracing::error!("accept task failed: {err:?}");
                 }
@@ -200,7 +200,7 @@ impl Worker {
                     };
                     callme::run::connect(
                         &ep,
-                        audio_opts.clone(),
+                        audio_config.clone(),
                         node_id,
                         Some(connect_event_tx.clone()),
                     )

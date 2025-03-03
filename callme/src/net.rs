@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use futures_concurrency::future::TryJoin;
-use iroh::{endpoint::Connection, Endpoint, NodeId};
+use iroh::{endpoint::Connection, Endpoint, NodeAddr};
 use iroh_roq::{
     rtp::{
         self,
@@ -31,8 +31,8 @@ pub async fn bind_endpoint() -> Result<Endpoint> {
         .await
 }
 
-pub async fn connect(endpoint: &Endpoint, node_id: NodeId) -> Result<Connection> {
-    let conn = endpoint.connect(node_id, ALPN).await?;
+pub async fn connect(endpoint: &Endpoint, node_addr: impl Into<NodeAddr>) -> Result<Connection> {
+    let conn = endpoint.connect(node_addr, ALPN).await?;
     Ok(conn)
 }
 
@@ -56,6 +56,7 @@ pub async fn handle_connection(conn: Connection, audio_streams: MediaStreams) ->
     let mut recv_flow = session.new_receive_flow(flow_id).await.unwrap();
 
     let recv_fut = async move {
+        let mut last_ts = None;
         loop {
             let packet = recv_flow.read_rtp().await?;
             trace!(
@@ -63,9 +64,19 @@ pub async fn handle_connection(conn: Connection, audio_streams: MediaStreams) ->
                 packet.payload.len(),
                 packet.header
             );
+            let packet_ts = packet.header.timestamp;
+            let skipped_samples = match last_ts {
+                None => None,
+                // drop old packets
+                // TODO: jitter buffer?
+                Some(last_ts) if packet_ts <= last_ts => continue,
+                Some(last_ts) => Some(packet_ts - last_ts),
+            };
+            last_ts = Some(packet_ts);
             if let Err(err) = inbound_audio_sender
                 .send(InboundAudio::Opus {
                     payload: packet.payload,
+                    skipped_samples,
                 })
                 .await
             {

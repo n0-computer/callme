@@ -2,16 +2,19 @@ use anyhow::Context;
 use clap::Parser;
 
 use callme::{
-    audio::{self, start_audio},
+    audio::{self, start_audio, AudioConfig},
     net, run, NodeId,
 };
 
 #[derive(Parser, Debug)]
 #[command(about = "Call me iroh", long_about = None)]
 struct Args {
-    /// The audio device to use
+    /// The audio input device to use.
     #[arg(short, long)]
-    device: Option<String>,
+    input_device: Option<String>,
+    /// The audio output device to use.
+    #[arg(short, long)]
+    output_device: Option<String>,
     #[clap(subcommand)]
     command: Command,
 }
@@ -23,7 +26,14 @@ enum Command {
     /// Make a call to a remote node.
     Connect { node_id: NodeId },
     /// Create a debug feedback loop through iroh-roq.
-    FeedbackRoq,
+    FeedbackRoq {
+        /// The second audio input device to use.
+        #[arg(short, long)]
+        input_device_2: Option<String>,
+        /// The second audio output device to use.
+        #[arg(short, long)]
+        output_device_2: Option<String>,
+    },
     /// Create a debug feedback loop through an in-memory channel.
     FeedbackDirect,
 }
@@ -32,24 +42,32 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    let audio_opts = audio::Opts {
-        device: args.device,
+    let audio_config = AudioConfig {
+        input_device: args.input_device,
+        output_device: args.output_device,
     };
     let ep = net::bind_endpoint().await?;
     match args.command {
         Command::Accept => {
             println!("our node id:\n{}", ep.node_id());
-            run::accept(&ep, audio_opts, None)
+            run::accept(&ep, audio_config, None)
                 .await
                 .context("accept failed")?;
         }
         Command::Connect { node_id } => {
-            run::connect(&ep, audio_opts, node_id, None)
+            run::connect(&ep, audio_config, node_id, None)
                 .await
                 .context("connect failed")?;
         }
-        Command::FeedbackRoq => {
-            run::feedback(ep, audio_opts)
+        Command::FeedbackRoq {
+            input_device_2,
+            output_device_2,
+        } => {
+            let audio_config_2 = AudioConfig {
+                input_device: input_device_2,
+                output_device: output_device_2,
+            };
+            run::feedback(ep, audio_config, audio_config_2)
                 .await
                 .context("feedback failed")?;
         }
@@ -61,7 +79,10 @@ async fn main() -> anyhow::Result<()> {
                     audio::OutboundAudio::Opus {
                         payload,
                         sample_count: _,
-                    } => audio::InboundAudio::Opus { payload },
+                    } => audio::InboundAudio::Opus {
+                        payload,
+                        skipped_samples: None,
+                    },
                 };
                 streams.inbound_audio_sender.send(inbound_item).await?;
             }
