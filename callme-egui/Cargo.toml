@@ -40,3 +40,12 @@ features = ["wgpu", "android-native-activity", "default_fonts"]
 version = "0.31"
 default-features = false
 features = ["clipboard", "links"]
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_NETWORK_STATE"
+[[package.metadata.android.uses_permission]]
+name = "android.permission.CHANGE_NETWORK_STATE"
+[[package.metadata.android.uses_permission]]
+name = "android.permission.RECORD_AUDIO"

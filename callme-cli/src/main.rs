@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::Parser;
 
 use callme::{
-    audio::{self, list_devices, start_audio, AudioConfig},
+    audio::{self, list_devices, AudioConfig},
     net, run, NodeId,
 };
 
@@ -76,21 +76,22 @@ async fn main() -> anyhow::Result<()> {
                     .context("feedback failed")?;
             }
             Command::FeedbackDirect => {
-                let (streams, _audio_state) = start_audio(Default::default())?;
-                loop {
-                    let outbound_item = streams.recorder.recv().await?;
-                    let inbound_item = match outbound_item {
-                        audio::OutboundAudio::Opus {
-                            payload,
-                            sample_count: _,
-                        } => audio::InboundAudio::Opus {
-                            payload,
-                            // skipped_samples: None,
-                            skipped_frames: None,
-                        },
-                    };
-                    streams.player.send(inbound_item).await?;
-                }
+                audio::debug::feedback()?;
+                // let (streams, _audio_state) = start_audio(Default::default())?;
+                // loop {
+                //     let outbound_item = streams.recorder.recv().await?;
+                //     let inbound_item = match outbound_item {
+                //         audio::OutboundAudio::Opus {
+                //             payload,
+                //             sample_count: _,
+                //         } => audio::InboundAudio::Opus {
+                //             payload,
+                //             // skipped_samples: None,
+                //             skipped_frames: None,
+                //         },
+                //     };
+                //     streams.player.send(inbound_item).await?;
+                // }
             }
             Command::ListDevices => {
                 let devices = list_devices()?;

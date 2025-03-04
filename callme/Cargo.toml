@@ -9,7 +9,7 @@ async-channel = "2.3.1"
 bytes = "1.10.0"
 cpal = { version = "0.15.3" }
 dasp_sample = "0.11.0"
-derive_more = { version = "2.0.1", features = ["debug"] }
+derive_more = { version = "2.0.1", features = ["debug", "deref"] }
 fixed-resample = "0.6.1"
 futures-concurrency = "7.6.3"
 futures-util = "0.3.31"
@@ -39,3 +39,8 @@ cpal = { version = "0.15.3", features = ["oboe-shared-stdcxx"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 cpal = { version = "0.15.3", features = ["wasm-bindgen"] }
+
+[dev-dependencies]
+clap = { version = "4.5.31", features = ["derive"] }
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3.19"

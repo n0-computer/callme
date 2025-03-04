@@ -57,10 +57,11 @@ pub fn find_device(host: &cpal::Host, direction: Direction, name: Option<&str>) 
             Direction::Input => host.default_input_device(),
             Direction::Output => host.default_output_device(),
         };
-        match device {
-            Some(device) => Ok(Some(device)),
-            None => Ok(iter()?.next()),
-        }
+        let device = match device {
+            Some(device) => Some(device),
+            None => iter()?.next(),
+        };
+        anyhow::Ok(device)
     };
 
     let device = match &name {

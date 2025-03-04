@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["callme", "callme-cli", "callme-egui", "callme-web"]
+members = ["callme", "callme-cli", "callme-egui", "callme-media", "callme-web"]
 
 # [patch."https://github.com/dignifiedquire/iroh-roq.git"]
 # iroh-roq = { git = "https://github.com/Frando/iroh-roq.git", branch = "Frando/dev" }
@@ -16,5 +16,6 @@ members = ["callme", "callme-cli", "callme-egui", "callme-web"]
 # iroh-quinn-proto = { path = "../iroh-quinn/quinn-proto" }
 # iroh-quinn-udp = { path = "../iroh-quinn/quinn-udp" }
 
-# [patch.crates-io]
-# webrtc-audio-processing = { git = "https://github.com/tonarino/webrtc-audio-processing.git", branch = "upgrade-v1" }
+[patch.crates-io]
+webrtc-audio-processing = { path = "../webrtc-audio-processing" }
+iroh-roq = { path = "../iroh-roq" }

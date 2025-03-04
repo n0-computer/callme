@@ -6,6 +6,7 @@ use cpal::{ChannelCount, SampleRate};
 use device::{list_input_devices, list_output_devices};
 use processor::Processor;
 
+pub mod debug;
 mod device;
 mod play;
 mod processor;
@@ -26,6 +27,9 @@ pub struct AudioStreams {
     pub recorder: AudioRecorder,
     pub player: AudioPlayer,
 }
+
+// pub type OutboundAudioStream = async_channel::Receiver<OutboundAudio>;
+// pub type InboundAudioStream = async_channel::Sender<InboundAudio>;
 
 #[derive(Debug)]
 pub struct AudioState;
