@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::Parser;
 
 use callme::{
-    audio::{self, start_audio, AudioConfig},
+    audio::{self, list_devices, start_audio, AudioConfig},
     net, run, NodeId,
 };
 
@@ -36,6 +36,8 @@ enum Command {
     },
     /// Create a debug feedback loop through an in-memory channel.
     FeedbackDirect,
+    /// List the available audio devices
+    ListDevices,
 }
 
 #[tokio::main]
@@ -89,6 +91,10 @@ async fn main() -> anyhow::Result<()> {
                     };
                     streams.player.send(inbound_item).await?;
                 }
+            }
+            Command::ListDevices => {
+                let devices = list_devices()?;
+                println!("{devices:#?}");
             }
         }
         anyhow::Ok(())

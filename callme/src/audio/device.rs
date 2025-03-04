@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use cpal::{
     traits::{DeviceTrait, HostTrait},
-    BufferSize, Device, SampleFormat, StreamConfig, SupportedStreamConfigRange,
+    BufferSize, Device, Host, SampleFormat, StreamConfig, SupportedStreamConfigRange,
 };
 use tracing::info;
 
@@ -36,74 +36,41 @@ impl Default for AudioConfig {
     }
 }
 
-pub fn find_input_device(host: &cpal::Host, input_device: Option<&str>) -> Result<Device> {
-    let device = match &input_device {
-        None => {
-            // On linux, prefer "pipewire" device if it exists.
-            // On some machines, the "default" ALSA device cannot be opened multiple times,
-            // while the "pipewire" device can.
-            #[cfg(target_os = "linux")]
-            if let Some(device) = host
-                .input_devices()?
-                .find(|x| x.name().map(|y| &y == "pipewire").unwrap_or(false))
-                .or_else(|| host.default_input_device())
-            {
-                Some(device)
-            } else {
-                host.input_devices()?.next()
-            }
+#[derive(Debug, Clone, Copy)]
+pub enum Direction {
+    Input,
+    Output,
+}
 
-            #[cfg(not(target_os = "linux"))]
-            if let Some(device) = host.default_input_device() {
-                Some(device)
-            } else {
-                host.input_devices()?.next()
-            }
+pub fn find_device(host: &cpal::Host, direction: Direction, name: Option<&str>) -> Result<Device> {
+    let iter = || match direction {
+        Direction::Input => host.input_devices(),
+        Direction::Output => host.output_devices(),
+    };
+    let default = || {
+        #[cfg(target_os = "linux")]
+        if let Some(device) = iter()?.find(|x| x.name().ok().as_deref() == Some("pipewire")) {
+            return anyhow::Ok(Some(device));
+        };
+
+        let device = match direction {
+            Direction::Input => host.default_input_device(),
+            Direction::Output => host.default_output_device(),
+        };
+        match device {
+            Some(device) => Ok(Some(device)),
+            None => Ok(iter()?.next()),
         }
-        Some(device) => host
-            .input_devices()?
-            .find(|x| x.name().map(|y| &y == device).unwrap_or(false)),
+    };
+
+    let device = match &name {
+        Some(device) => iter()?.find(|x| x.name().map(|y| &y == device).unwrap_or(false)),
+        None => default()?,
     };
     device.with_context(|| {
         format!(
             "could not find input audio device `{}`",
-            input_device.unwrap_or("default")
-        )
-    })
-}
-
-pub fn find_output_device(host: &cpal::Host, output_device: Option<&str>) -> Result<Device> {
-    let device = match &output_device {
-        None => {
-            // On linux, prefer "pipewire" device if it exists.
-            // On some machines, the "default" ALSA device cannot be opened multiple times,
-            // while the "pipewire" device can.
-            #[cfg(target_os = "linux")]
-            if let Some(device) = host
-                .output_devices()?
-                .find(|x| x.name().map(|y| &y == "pipewire").unwrap_or(false))
-                .or_else(|| host.default_output_device())
-            {
-                Some(device)
-            } else {
-                host.output_devices()?.next()
-            }
-
-            #[cfg(not(target_os = "linux"))]
-            if let Some(device) = host.default_output_device() {
-                Some(device)
-            } else {
-                host.output_devices()?.next()
-            }
-        }
-        Some(device) => host
-            .output_devices()?
-            .find(|x| x.name().map(|y| &y == device).unwrap_or(false)),
-    };
-    device.with_context(|| {
-        format!(
-            "could not find output audio device `{}`",
-            output_device.unwrap_or("default")
+            name.unwrap_or("default")
         )
     })
 }
@@ -132,8 +99,6 @@ pub fn input_stream_config(device: &Device, params: &StreamParams) -> Result<Str
     });
     info!("final input config: {config:?}");
     let sample_format = config.sample_format();
-    // let channel_count = config.channels() as usize;
-
     let mut config: cpal::StreamConfig = config.into();
     config.buffer_size = BufferSize::Fixed(params.buffer_size(DURATION_20MS) as u32);
     Ok(StreamInfo {
@@ -166,14 +131,26 @@ pub fn output_stream_config(device: &Device, params: &StreamParams) -> Result<St
     });
     info!("final output config: {config:?}");
     let sample_format = config.sample_format();
-    // let channel_count = config.channels() as usize;
-
     let mut config: cpal::StreamConfig = config.into();
     config.buffer_size = BufferSize::Fixed(params.buffer_size(DURATION_20MS) as u32);
     Ok(StreamInfo {
         sample_format,
         config,
     })
+}
+
+pub fn list_input_devices(host: &Host) -> Result<Vec<String>> {
+    Ok(host
+        .input_devices()?
+        .filter_map(|x| x.name().ok())
+        .collect())
+}
+
+pub fn list_output_devices(host: &Host) -> Result<Vec<String>> {
+    Ok(host
+        .output_devices()?
+        .filter_map(|x| x.name().ok())
+        .collect())
 }
 
 #[derive(Debug)]

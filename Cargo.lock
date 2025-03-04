@@ -3227,7 +3227,8 @@ dependencies = [
 [[package]]
 name = "iroh-roq"
 version = "0.1.0"
-source = "git+https://github.com/Frando/iroh-roq.git?branch=Frando%2Fdev#b4f99dd8d9396b54e221f71024be9c17ccadd233"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ba28cc2a62f5f2ce520c60563d6868d75c3e29742e73d1c56ccd5ec2d830a09"
 dependencies = [
  "anyhow",
  "iroh",

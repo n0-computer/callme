@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
 use cpal::{ChannelCount, SampleRate};
+use device::{list_input_devices, list_output_devices};
 use processor::Processor;
 
 mod device;
@@ -37,6 +38,19 @@ pub fn start_audio(config: AudioConfig) -> Result<(AudioStreams, AudioState)> {
     let streams = AudioStreams { recorder, player };
     let state = AudioState;
     Ok((streams, state))
+}
+
+pub fn list_devices() -> Result<Devices> {
+    let host = cpal::default_host();
+    let input = list_input_devices(&host)?;
+    let output = list_output_devices(&host)?;
+    Ok(Devices { input, output })
+}
+
+#[derive(Debug)]
+pub struct Devices {
+    pub input: Vec<String>,
+    pub output: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]

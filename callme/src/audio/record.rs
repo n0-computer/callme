@@ -11,12 +11,11 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{error, info, trace, warn};
 
-use super::device::input_stream_config;
-use super::processor::Processor;
-use super::OPUS_STREAM_PARAMS;
+use super::device::Direction;
 use super::{
-    device::find_input_device, device::StreamInfo, OutboundAudio, StreamParams, DURATION_10MS,
-    DURATION_20MS, SAMPLE_RATE,
+    device::{find_device, input_stream_config, StreamInfo},
+    processor::Processor,
+    OutboundAudio, StreamParams, DURATION_10MS, DURATION_20MS, OPUS_STREAM_PARAMS, SAMPLE_RATE,
 };
 
 #[derive(Debug)]
@@ -27,7 +26,7 @@ pub struct AudioRecorder {
 
 impl AudioRecorder {
     pub fn build(host: &cpal::Host, device: Option<&str>, processor: Processor) -> Result<Self> {
-        let device = find_input_device(host, device)?;
+        let device = find_device(host, Direction::Input, device)?;
         let params = OPUS_STREAM_PARAMS;
         let stream_info = input_stream_config(&device, &params)?;
         let (sender, receiver) = async_channel::bounded(128);

@@ -2,8 +2,8 @@
 resolver = "2"
 members = ["callme", "callme-cli", "callme-egui", "callme-web"]
 
-[patch."https://github.com/dignifiedquire/iroh-roq.git"]
-iroh-roq = { git = "https://github.com/Frando/iroh-roq.git", branch = "Frando/dev" }
+# [patch."https://github.com/dignifiedquire/iroh-roq.git"]
+# iroh-roq = { git = "https://github.com/Frando/iroh-roq.git", branch = "Frando/dev" }
 # iroh-roq = { path = "../iroh-roq" }
 
 # this is needed for compiling to wasm
@@ -15,3 +15,6 @@ iroh-roq = { git = "https://github.com/Frando/iroh-roq.git", branch = "Frando/de
 # iroh-quinn = { path = "../iroh-quinn/quinn" }
 # iroh-quinn-proto = { path = "../iroh-quinn/quinn-proto" }
 # iroh-quinn-udp = { path = "../iroh-quinn/quinn-udp" }
+
+# [patch.crates-io]
+# webrtc-audio-processing = { git = "https://github.com/tonarino/webrtc-audio-processing.git", branch = "upgrade-v1" }

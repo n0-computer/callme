@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
 
-use super::device::{find_output_device, output_stream_config};
+use super::device::{find_device, output_stream_config, Direction};
 use super::processor::Processor;
 use super::OPUS_STREAM_PARAMS;
 use super::{
@@ -25,7 +25,7 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     pub fn build(host: &cpal::Host, device: Option<&str>, processor: Processor) -> Result<Self> {
-        let device = find_output_device(host, device)?;
+        let device = find_device(host, Direction::Output, device)?;
         let params = OPUS_STREAM_PARAMS;
         let stream_info = output_stream_config(&device, &params)?;
         let (sender, receiver) = async_channel::bounded(128);

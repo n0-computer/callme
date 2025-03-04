@@ -32,59 +32,59 @@ impl eframe::App for App {
             .min_height(40.)
             .show(ctx, |_ui| {});
         egui::CentralPanel::default().show(ctx, |ui| {
+            // ui.vertical(|ui| {
+            ui.heading("Call a remote node");
             ui.vertical(|ui| {
-                ui.heading("Call a remote node");
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        let name_label = ui.label("Node id: ");
-                        ui.text_edit_singleline(&mut self.remote_node_id)
-                            .labelled_by(name_label.id);
-                    });
-                    #[cfg(target_os = "android")]
+                ui.horizontal(|ui| {
+                    let name_label = ui.label("Node id: ");
+                    ui.text_edit_singleline(&mut self.remote_node_id)
+                        .labelled_by(name_label.id);
+                });
+                #[cfg(target_os = "android")]
+                {
+                    if ui
+                        .button("📋 Paste")
+                        .on_hover_text("Click to paste")
+                        .clicked()
                     {
-                        if ui
-                            .button("📋 Paste")
-                            .on_hover_text("Click to paste")
-                            .clicked()
-                        {
-                            self.remote_node_id = android_clipboard::get_text()
-                                .expect("failed to get text from clipboard");
-                        }
+                        self.remote_node_id = android_clipboard::get_text()
+                            .expect("failed to get text from clipboard");
                     }
-                });
-                if ui.button("Call").clicked() {
-                    self.call();
                 }
-
-                ui.heading("Accept a call");
-                if let Some(node_id) = &self.our_node_id {
-                    ui.vertical(|ui| {
-                        // ui.label(format!("{}…", &node_id[..16]));
-                        if ui
-                            .button("📋 Copy node id")
-                            .on_hover_text("Click to copy")
-                            .clicked()
-                        {
-                            ui.output_mut(|writer| {
-                                writer
-                                    .commands
-                                    .push(OutputCommand::CopyText(node_id.to_string()));
-                            });
-                            #[cfg(target_os = "android")]
-                            if let Err(err) = android_clipboard::set_text(node_id.to_string()) {
-                                tracing::warn!("failed to copy text to clipboard: {err}");
-                            }
-                        }
-                    });
-                }
-
-                ui.heading("Log");
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for line in &self.log {
-                        ui.label(line);
-                    }
-                });
             });
+            if ui.button("Call").clicked() {
+                self.call();
+            }
+
+            ui.heading("Accept a call");
+            if let Some(node_id) = &self.our_node_id {
+                ui.vertical(|ui| {
+                    // ui.label(format!("{}…", &node_id[..16]));
+                    if ui
+                        .button("📋 Copy node id")
+                        .on_hover_text("Click to copy")
+                        .clicked()
+                    {
+                        ui.output_mut(|writer| {
+                            writer
+                                .commands
+                                .push(OutputCommand::CopyText(node_id.to_string()));
+                        });
+                        #[cfg(target_os = "android")]
+                        if let Err(err) = android_clipboard::set_text(node_id.to_string()) {
+                            tracing::warn!("failed to copy text to clipboard: {err}");
+                        }
+                    }
+                });
+            }
+
+            ui.heading("Log");
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for line in &self.log {
+                    ui.label(line);
+                }
+            });
+            // });
         });
     }
 }
@@ -164,6 +164,8 @@ impl Worker {
             .await?;
         self.log(format!("our node id: {}", ep.node_id().fmt_short()))
             .await;
+        let devices = callme::audio::list_devices()?;
+        self.log(format!("{devices:#?}")).await;
         let audio_config = callme::audio::AudioConfig::default();
         let (accept_event_tx, accept_event_rx) = async_channel::bounded(16);
         let (connect_event_tx, connect_event_rx) = async_channel::bounded(16);
