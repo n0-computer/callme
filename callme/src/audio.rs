@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
 use cpal::{ChannelCount, SampleRate};
+use processor::Processor;
 
 mod device;
 mod play;
@@ -30,8 +31,9 @@ pub struct AudioState;
 
 pub fn start_audio(config: AudioConfig) -> Result<(AudioStreams, AudioState)> {
     let host = cpal::default_host();
-    let player = AudioPlayer::build(&host, config.output_device.as_deref())?;
-    let recorder = AudioRecorder::build(&host, config.input_device.as_deref())?;
+    let processor = Processor::new(1, 1, None)?;
+    let player = AudioPlayer::build(&host, config.output_device.as_deref(), processor.clone())?;
+    let recorder = AudioRecorder::build(&host, config.input_device.as_deref(), processor)?;
     let streams = AudioStreams { recorder, player };
     let state = AudioState;
     Ok((streams, state))

@@ -12,6 +12,7 @@ use std::time::Instant;
 use tracing::{error, info, trace, warn};
 
 use super::device::input_stream_config;
+use super::processor::Processor;
 use super::OPUS_STREAM_PARAMS;
 use super::{
     device::find_input_device, device::StreamInfo, OutboundAudio, StreamParams, DURATION_10MS,
@@ -25,7 +26,7 @@ pub struct AudioRecorder {
 }
 
 impl AudioRecorder {
-    pub fn build(host: &cpal::Host, device: Option<&str>) -> Result<Self> {
+    pub fn build(host: &cpal::Host, device: Option<&str>, processor: Processor) -> Result<Self> {
         let device = find_input_device(host, device)?;
         let params = OPUS_STREAM_PARAMS;
         let stream_info = input_stream_config(&device, &params)?;
@@ -36,7 +37,7 @@ impl AudioRecorder {
                 "spawn record worker: device={} stream_info={stream_info:?}",
                 device.name().unwrap()
             );
-            if let Err(err) = run(&device, &stream_info, sender, closed) {
+            if let Err(err) = run(&device, &stream_info, sender, closed, processor) {
                 error!("record worker thread failed: {err:?}");
             }
         });
@@ -55,6 +56,7 @@ fn run(
     stream_info: &StreamInfo,
     sender: async_channel::Sender<OutboundAudio>,
     closed: Arc<AtomicBool>,
+    processor: Processor,
 ) -> Result<()> {
     let stream_params =
         StreamParams::new(stream_info.config.sample_rate, stream_info.config.channels);
@@ -72,7 +74,7 @@ fn run(
         }
     }?;
     stream.play()?;
-    let worker = RecordWorker::new(stream_params, stream, closed, consumer, sender);
+    let worker = RecordWorker::new(stream_params, stream, closed, consumer, sender, processor);
     // this blocks.
     worker.run()?;
     Ok(())
@@ -117,6 +119,7 @@ struct RecordWorker {
     consumer: Consumer<f32>,
     sender: async_channel::Sender<OutboundAudio>,
     resampler: FixedResampler<f32, 2>,
+    processor: Processor,
     opus_encoder: OpusFramer,
     audio_buf: Vec<f32>,
     resampled_buf: Vec<f32>,
@@ -129,6 +132,7 @@ impl RecordWorker {
         closed: Arc<AtomicBool>,
         consumer: Consumer<f32>,
         sender: async_channel::Sender<OutboundAudio>,
+        processor: Processor,
     ) -> Self {
         info!("recorder worker init {record_params:?}");
         let resampler = FixedResampler::new(
@@ -149,6 +153,7 @@ impl RecordWorker {
             opus_encoder: OpusFramer::new(OPUS_STREAM_PARAMS),
             audio_buf,
             resampled_buf,
+            processor,
         }
     }
     pub fn run(mut self) -> Result<()> {
@@ -157,11 +162,11 @@ impl RecordWorker {
             let start = Instant::now();
             match self.process(tick)? {
                 ProcessOutcome::Empty => {}
+                ProcessOutcome::Sent => {}
                 ProcessOutcome::ChannelClosed => {
                     tracing::info!("closing recorder: input receiver closed.");
                     break;
                 }
-                ProcessOutcome::Sent { sample_count: _ } => {}
             }
             let sleep_time = (start + DURATION_10MS).saturating_duration_since(Instant::now());
             std::thread::sleep(sleep_time);
@@ -179,7 +184,6 @@ impl RecordWorker {
             return Ok(ProcessOutcome::Empty);
         }
 
-        self.resampled_buf.clear();
         self.resampler.process_interleaved(
             &self.audio_buf,
             |samples| {
@@ -188,46 +192,57 @@ impl RecordWorker {
             None,
             false,
         );
-        // self.resampled_buf.clear();
-        // self.resampled_buf.extend(&self.audio_buf);
-        trace!(
-            "recorder[{tick}]: processing {} resampled {} ",
-            self.audio_buf.len(),
-            self.resampled_buf.len()
-        );
-        for sample in &self.resampled_buf[..] {
-            if let Some((payload, sample_count)) = self.opus_encoder.push_sample(*sample) {
-                let payload_len = payload.len();
-                match self.sender.force_send(OutboundAudio::Opus {
-                    payload,
-                    sample_count,
-                }) {
-                    Ok(None) => {
-                        trace!(
-                            "recorder[{tick}]: sent opus {sample_count}S {}B",
-                            payload_len
-                        );
-                    }
-                    Ok(Some(_)) => {
-                        warn!("record channel full, dropping oldest frame");
-                    }
-                    Err(async_channel::SendError(_)) => {
-                        return Ok(ProcessOutcome::ChannelClosed);
+
+        let chunk_size = OPUS_STREAM_PARAMS.buffer_size(DURATION_10MS);
+        let mut stopped_after = None;
+        for (i, frame) in self.resampled_buf.chunks_mut(chunk_size).enumerate() {
+            if frame.len() == chunk_size {
+                self.processor.process_capture_frame(frame)?;
+            } else {
+                stopped_after = Some(i);
+                break;
+            }
+
+            for sample in frame {
+                if let Some((payload, sample_count)) = self.opus_encoder.push_sample(*sample) {
+                    let payload_len = payload.len();
+                    let frame = OutboundAudio::Opus {
+                        payload,
+                        sample_count,
+                    };
+                    match self.sender.force_send(frame) {
+                        Ok(None) => {
+                            trace!("recorder[{tick}]: sent opus {sample_count}S {payload_len}B")
+                        }
+                        Ok(Some(_)) => warn!("record channel full, dropping oldest frame"),
+                        Err(_) => return Ok(ProcessOutcome::ChannelClosed),
                     }
                 }
             }
         }
 
-        Ok(ProcessOutcome::Sent {
-            sample_count: self.resampled_buf.len(),
-        })
+        if let Some(i) = stopped_after {
+            let reminder_start = chunk_size * i;
+            let reminder_len = self.resampled_buf.len() - reminder_start;
+            self.resampled_buf.copy_within(reminder_start.., 0);
+            self.resampled_buf.truncate(reminder_len);
+        } else {
+            self.resampled_buf.clear();
+        }
+        trace!(
+            "recorder[{tick}]: processing {} resampled {} ",
+            self.audio_buf.len(),
+            self.resampled_buf.len()
+        );
+
+        Ok(ProcessOutcome::Sent)
     }
 }
 
 enum ProcessOutcome {
     Empty,
     ChannelClosed,
-    Sent { sample_count: usize },
+    Sent,
 }
 
 pub struct OpusFramer {
