@@ -120,8 +120,8 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
     let mut tick = 0;
     // TODO: remove once resampler is readded
     assert_eq!(state.params.sample_rate, SAMPLE_RATE);
-    let buf_size = state.params.buffer_size(DURATION_10MS);
-    let mut buf: Vec<f32> = Vec::with_capacity(buf_size);
+    let frame_size = state.params.buffer_size(DURATION_10MS);
+    let mut input_buf: Vec<f32> = Vec::with_capacity(frame_size);
     device.build_input_stream::<S, _, _>(
         config,
         move |data: &[S], info: &_| {
@@ -136,24 +136,42 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
                 .unwrap_or_default();
             state.processor.set_capture_delay(capture_delay);
 
-            for (_i, sample) in data.iter().enumerate() {
-                buf.push(sample.to_sample());
-                if buf.len() == buf_size {
+            for s in data {
+                input_buf.push(s.to_sample());
+                if input_buf.len() == frame_size {
                     state
                         .processor
-                        .process_render_frame(&mut buf)
-                        .expect("record: failed to run processor");
-                    let n = state.producer.push_slice(&buf);
-                    if n < buf.len() {
+                        .process_capture_frame(&mut input_buf[..])
+                        .unwrap();
+                    let n = state.producer.push_slice(&input_buf);
+                    if n < data.len() {
                         warn!(
-                            "record stream underflow at tick {tick}, failed to push {} of {}",
-                            buf.len() - n,
-                            buf.len()
+                            "record overflow: failed to push {} of {}",
+                            data.len() - n,
+                            data.len()
                         );
                     }
-                    buf.clear();
+                    input_buf.clear();
                 }
             }
+            // for (_i, sample) in data.iter().enumerate() {
+            //     buf.push(sample.to_sample());
+            //     if buf.len() == buf_size {
+            //         state
+            //             .processor
+            //             .process_render_frame(&mut buf)
+            //             .expect("record: failed to run processor");
+            //         let n = state.producer.push_slice(&buf);
+            //         if n < buf.len() {
+            //             warn!(
+            //                 "record stream underflow at tick {tick}, failed to push {} of {}",
+            //                 buf.len() - n,
+            //                 buf.len()
+            //             );
+            //         }
+            //         buf.clear();
+            //     }
+            // }
             tick += 1;
         },
         |err| {

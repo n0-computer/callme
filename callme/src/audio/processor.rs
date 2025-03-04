@@ -54,6 +54,7 @@ impl Processor {
             ..Config::default()
         };
         processor.set_config(config.clone());
+        tracing::info!("PROCESSOR INIT");
         Ok(Self(Arc::new(Inner {
             inner: Mutex::new(processor),
             config: Mutex::new(config),

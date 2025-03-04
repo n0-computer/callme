@@ -60,7 +60,6 @@ fn run(
     let buffer_size = params.buffer_size(DURATION_20MS) * 2;
     let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
     let config = &stream_info.config;
-    let p = processor.clone();
     let stream = match stream_info.sample_format {
         SampleFormat::I8 => build_output_stream::<i8>(&device, &config, consumer, processor),
         SampleFormat::I16 => build_output_stream::<i16>(&device, &config, consumer, processor),
@@ -72,7 +71,7 @@ fn run(
         }
     }?;
     stream.play()?;
-    let worker = PlaybackWorker::new(params, stream, closed, producer, receiver, p);
+    let worker = PlaybackWorker::new(params, stream, closed, producer, receiver);
     // this blocks.
     worker.run()?;
     Ok(())
@@ -84,109 +83,64 @@ fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Def
     mut consumer: Consumer<f32>,
     processor: Processor,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
-    let mut cnt = 0;
+    // let mut cnt = 0;
+    // let mut last_warning = Instant::now();
+    // let mut buf: Vec<f32> = Vec::new();
+    // let mut fell_behind_count = 0;
+
+    // todo: calculate
+    let frame_size = 480;
+    let mut unprocessed: Vec<f32> = Vec::with_capacity(frame_size);
+    let mut processed: Vec<f32> = Vec::with_capacity(frame_size);
+    let mut tick = 0;
     let mut last_warning = Instant::now();
-    let buf_size = 480;
-    let mut buf: Vec<f32> = Vec::new();
-    let mut fell_behind_count = 0;
+    let mut underflows = 0;
     device.build_output_stream::<S, _, _>(
         config,
         move |data: &mut [S], info: &_| {
-            if cnt < 5 {
-                info!("player-cb[{cnt}] stream started. len={}", data.len());
+            if tick < 2 {
+                info!("player-cb[{tick}] stream started. len={}", data.len());
             }
 
             let delay = info
                 .timestamp()
-                .playback
-                .duration_since(&info.timestamp().callback)
+                .callback
+                .duration_since(&info.timestamp().playback)
                 .unwrap_or_default();
             processor.set_playback_delay(delay);
 
-            // if cnt % 5 == 0 {
-                trace!(
-                    "player-cb[{cnt}] tick data_len={} consumer_occupied={} buf_len={} delay={delay:?}",
-                    data.len(),
-                    consumer.occupied_len(),
-                    buf.len()
-                );
-            // }
+            // pop data and process, if possible
+            unprocessed.extend(consumer.pop_iter().take(frame_size - unprocessed.len()));
+            if unprocessed.len() == frame_size {
+                processor.process_render_frame(&mut unprocessed).unwrap();
+                processed.extend(&unprocessed);
+                unprocessed.clear();
+            }
 
-            for chunk in data.chunks_mut(buf_size) {
-                // fill our temp buf from the ringbuf
-                while buf.len() < buf_size {
-                    buf.push(match consumer.try_pop() {
-                        Some(s) => s.to_sample(),
-                        None => {
-                            break;
-                        }
-                    })
-                }
-                trace!("chunk, len {} buf_len {}", chunk.len(), buf.len());
-                // we need exactly buf_size elements for the processor to work
-                if buf.len() == buf_size {
-                    processor
-                        .process_render_frame(&mut buf)
-                        .expect("failed to run processor on render frame");
-                    // copy the processed samples into the outbuf
-                    for (i, sample) in chunk.iter_mut().enumerate() {
-                        *sample = buf[i].to_sample();
-                    }
-                    // if we didn't copy all, keep the rest.
-                    if chunk.len() != buf.len() {
-                        buf.copy_within(chunk.len().., 0);
-                        buf.truncate(buf.len() - chunk.len());
-                    // if we did copy all: clear.
-                    } else {
-                        buf.clear();
-                    }
-                // the ringbuf didn't yield enough elements to fill processor buf
-                } else {
-                    // silence!
-                    for sample in chunk.iter_mut() {
-                        *sample = Default::default();
-                    }
-                    // report once per second
-                    let now = Instant::now();
-                    if now.duration_since(last_warning) > Duration::from_secs(1) {
-                        let missing_count = buf_size - buf.len();
-                        warn!("player-cb[{cnt}] underflow: missing {missing_count} (+ {fell_behind_count} previous)");
-                        fell_behind_count = 0;
-                        last_warning = now;
-                    }
+            // copy to out
+            let out_len = processed.len().min(data.len());
+            let processed_remaining = processed.len() - out_len;
+            for (i, sample) in data[..out_len].iter_mut().enumerate() {
+                *sample = processed[i].to_sample()
+            }
+            // data[..out_len].copy_from_slice(&processed[..out_len].);
+            processed.copy_within(out_len.., 0);
+            processed.truncate(processed_remaining);
+            if out_len < data.len() {
+                let now = Instant::now();
+                if now.duration_since(last_warning) > Duration::from_secs(1) {
+                    warn!(
+                        "playback underflow: {} of {} samples missing (buffered {}) (+ {} previous)",
+                        data.len() - out_len,
+                        data.len(),
+                        unprocessed.len() + consumer.occupied_len(),
+                        underflows
+                    );
+                    underflows += 1;
+                    last_warning = now;
                 }
             }
-            // if cnt % 5 == 0 {
-                trace!("CB OUT");
-            // }
-            cnt += 1;
-
-            // let mut output_fell_behind = None;
-            // for (i, sample) in data.iter_mut().enumerate() {
-            //     *sample = match consumer.try_pop() {
-            //         Some(s) => s.to_sample(),
-            //         None => {
-            //             if output_fell_behind.is_none() {
-            //                 output_fell_behind = Some(i);
-            //             }
-            //             Default::default()
-            //         }
-            //     }
-            // }
-            // if let Some(count) = output_fell_behind {
-            //     warn!(
-            //         "player-cb[{cnt}] underflow: missing {} of {} (+ {fell_behind_count} previous)",
-            //         data.len() - count,
-            //         data.len()
-            //     );
-            //     // let now = Instant::now();
-            //     // if now.duration_since(last_warning) > Duration::from_secs(1) {
-            //     //     warn!("player-cb[{cnt}] underflow: empty after {} of {} (+ {fell_behind_count} previous)", count, data.len());
-            //     //     fell_behind_count = 0;
-            //     //     last_warning = now;
-            //     // }
-            //     fell_behind_count += 1;
-            // }
+            tick += 1;
         },
         |err| {
             error!("an error occurred on output stream: {}", err);
@@ -203,10 +157,8 @@ struct PlaybackWorker {
     receiver: async_channel::Receiver<InboundAudio>,
     params: StreamParams,
     resampler: FixedResampler<f32, 2>,
-    // resampler: Option<CpalResampler>,
     opus_decoder: opus::Decoder,
     audio_buf: Vec<f32>,
-    processor: Processor,
 }
 
 impl PlaybackWorker {
@@ -216,7 +168,6 @@ impl PlaybackWorker {
         closed: Arc<AtomicBool>,
         producer: Producer<f32>,
         receiver: async_channel::Receiver<InboundAudio>,
-        processor: Processor,
     ) -> Self {
         let resampler = FixedResampler::new(
             NonZeroUsize::new(playback_params.channel_count as usize).unwrap(),
@@ -237,7 +188,6 @@ impl PlaybackWorker {
             resampler,
             opus_decoder,
             audio_buf,
-            processor,
         }
     }
     pub fn run(mut self) -> Result<()> {
@@ -268,14 +218,14 @@ impl PlaybackWorker {
             let n = self
                 .opus_decoder
                 .decode_float(&[], &mut self.audio_buf, false)?;
-            trace!("player[{tick}]: {n} from skipped");
+            debug!("player[{tick}]: {n} from skipped");
             self.process_samples(n)?;
         }
 
         let n = self
             .opus_decoder
             .decode_float(&payload, &mut self.audio_buf, false)?;
-        trace!("player[{tick}]: {n} from data");
+        debug!("player[{tick}]: {n} from data");
         self.process_samples(n)?;
         Ok(())
     }
