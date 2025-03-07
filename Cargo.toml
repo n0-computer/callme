@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["callme", "callme-cli", "callme-egui", "callme-media", "callme-web"]
+members = ["callme", "callme-cli", "callme-egui", "callme-web"]
 
 # [patch."https://github.com/dignifiedquire/iroh-roq.git"]
 # iroh-roq = { git = "https://github.com/Frando/iroh-roq.git", branch = "Frando/dev" }

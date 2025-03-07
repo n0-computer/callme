@@ -892,15 +892,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "callme-media"
-version = "0.1.0"
-dependencies = [
- "rtp",
- "web-audio-api",
- "webrtc-media",
-]
-
-[[package]]
 name = "callme-web"
 version = "0.1.0"
 dependencies = [

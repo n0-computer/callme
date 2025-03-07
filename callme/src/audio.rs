@@ -16,11 +16,10 @@ use self::record::AudioRecorder;
 pub use self::record::AudioSink;
 use self::ringbuf_pipe::ringbuf_pipe;
 
-pub mod debug;
 mod device;
-pub mod playback;
+mod playback;
 mod processor;
-pub mod record;
+mod record;
 
 pub const SAMPLE_RATE: SampleRate = SampleRate(48_000);
 const DURATION_10MS: Duration = Duration::from_millis(10);
