@@ -1,7 +1,9 @@
 use anyhow::Context;
+use callme::{
+    audio::{AudioConfig, AudioContext},
+    net, run, NodeId,
+};
 use clap::Parser;
-
-use callme::{audio::AudioConfig, audio::AudioContext, net, run, NodeId};
 
 #[derive(Parser, Debug)]
 #[command(about = "Call me iroh", long_about = None)]

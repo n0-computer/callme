@@ -5,9 +5,8 @@ use cpal::{
 };
 use tracing::info;
 
-use crate::audio::{DURATION_10MS, DURATION_20MS};
-
 use super::{StreamParams, SAMPLE_RATE};
+use crate::audio::{DURATION_10MS, DURATION_20MS};
 
 #[derive(Debug, Clone)]
 pub struct AudioConfig {

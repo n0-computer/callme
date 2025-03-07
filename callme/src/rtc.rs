@@ -19,12 +19,12 @@ use tokio::sync::{broadcast, oneshot};
 use tracing::{info, warn};
 use webrtc_media::io::sample_builder::SampleBuilder;
 
+pub use self::{
+    protocol_handler::RtcProtocol,
+    track::{MediaFrame, MediaTrack, TrackKind},
+};
+use self::{rtp_receiver::RtpMediaTrackReceiver, rtp_sender::RtpMediaTrackSender};
 use crate::audio::AudioContext;
-
-pub use self::protocol_handler::RtcProtocol;
-use self::rtp_receiver::RtpReceiver;
-use self::rtp_sender::RtpSender;
-pub use self::track::{MediaFrame, MediaTrack, TrackKind};
 
 mod protocol_handler;
 mod rtp_receiver;
@@ -57,7 +57,7 @@ impl RtcConnection {
     pub async fn send_track(&self, track: MediaTrack) -> Result<()> {
         let flow_id = self.next_send_flow_id.next();
         let send_flow = self.session.new_send_flow(flow_id.into()).await?;
-        let sender = RtpSender { send_flow, track };
+        let sender = RtpMediaTrackSender { send_flow, track };
         task::spawn(async move {
             if let Err(err) = sender.run().await {
                 warn!(flow_id, "send flow failed: {err:?}");
@@ -71,7 +71,7 @@ impl RtcConnection {
         let recv_flow = self.session.new_receive_flow(flow_id.into()).await?;
         let (track_sender, track_receiver) = broadcast::channel(4);
         let (init_tx, init_rx) = oneshot::channel();
-        let receiver = RtpReceiver {
+        let receiver = RtpMediaTrackReceiver {
             recv_flow,
             track_sender,
             init_tx: Some(init_tx),

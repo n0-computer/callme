@@ -13,8 +13,6 @@ use webrtc_audio_processing::{
     NoiseSuppression, NoiseSuppressionLevel,
 };
 
-// pub use webrtc_audio_processing::NUM_SAMPLES_PER_FRAME;
-
 #[derive(Clone, Debug)]
 pub struct WebrtcAudioProcessor(Arc<Inner>);
 
@@ -75,9 +73,6 @@ impl WebrtcAudioProcessor {
 
     pub fn set_enabled(&self, enabled: bool) {
         let _prev = self.0.enabled.swap(enabled, Ordering::SeqCst);
-        // if !prev && enabled {
-        //     self.0.inner.lock().unwrap().
-        // }
     }
 
     /// Processes and modifies the audio frame from a capture device by applying
@@ -152,44 +147,3 @@ impl WebrtcAudioProcessor {
         inner.set_config(config.clone());
     }
 }
-
-// trait InputProcessor {
-//     fn process_input(&mut self, input: &[f32]) -> Option<&[f32]>;
-// }
-
-// trait OutputProcessor {
-//     fn process_output(&mut self, samples: &[f32], out: &mut [f32]);
-// }
-
-// struct WebrtcInputProcessor {
-//     processor: WebrtcAudioProcessor,
-//     channel_count: usize,
-//     buf: Vec<f32>,
-//     clear: bool
-// }
-
-// impl InputProcessor for WebrtcInputProcessor {
-//     fn process_input<S: ToSample<f32>(&mut self, input: &[S]) -> Option<&[f32]> {
-//         if clear {
-//             input_buf.clear()
-//         }
-//         for s in input {
-//             self.buf.push(s.to_sample());
-//             if self.input_buf.len() == frame_size {
-//                 self
-//                     .processor
-//                     .process_capture_frame(&mut input_buf[..])
-//                     .unwrap();
-//                 let n = state.producer.push_slice(&input_buf);
-//                 if n < data.len() {
-//                     warn!(
-//                         "record overflow: failed to push {} of {}",
-//                         data.len() - n,
-//                         data.len()
-//                     );
-//                 }
-//                 input_buf.clear();
-//             }
-//         }
-//     }
-// }

@@ -1,21 +1,21 @@
-use super::MediaFrame;
-
-use iroh_roq::rtp::codecs::opus::OpusPayloader;
-use iroh_roq::rtp::packetizer::{new_packetizer, Packetizer};
-use iroh_roq::rtp::sequence::Sequencer;
+use anyhow::{anyhow, Result};
+use iroh_roq::{
+    rtp,
+    rtp::{
+        codecs::opus::OpusPayloader,
+        packetizer::{new_packetizer, Packetizer},
+        sequence::Sequencer,
+    },
+    SendFlow,
+};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::trace;
 
+use super::{MediaFrame, MediaTrack};
 use crate::codec::Codec;
 
-use anyhow::{anyhow, Result};
-
-use iroh_roq::{rtp, SendFlow};
-
-use super::MediaTrack;
-
 #[derive(Debug)]
-pub(crate) struct RtpSender {
+pub(crate) struct RtpMediaTrackSender {
     pub(crate) track: MediaTrack,
     pub(crate) send_flow: SendFlow,
 }
@@ -24,7 +24,7 @@ pub(crate) const MTU: usize = 1100;
 
 pub(crate) const CLOCK_RATE: u32 = crate::audio::SAMPLE_RATE.0;
 
-impl RtpSender {
+impl RtpMediaTrackSender {
     pub(crate) async fn run(mut self) -> Result<()> {
         let ssrc = 0;
         let sequencer: Box<dyn Sequencer + Send + Sync> =

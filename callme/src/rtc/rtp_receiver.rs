@@ -1,22 +1,21 @@
+use anyhow::Result;
+use iroh_roq::{
+    rtp::{self, codecs::opus::OpusPacket, packetizer::Depacketizer},
+    ReceiveFlow,
+};
 use tokio::sync::{broadcast, oneshot};
 use tracing::{trace, warn};
 use webrtc_media::io::sample_builder::SampleBuilder;
 
-use iroh_roq::rtp::{self, codecs::opus::OpusPacket, packetizer::Depacketizer};
-
-use anyhow::Result;
-
-use iroh_roq::ReceiveFlow;
-
 use crate::{codec::Codec, rtc::MediaFrame};
 
-pub(crate) struct RtpReceiver {
+pub(crate) struct RtpMediaTrackReceiver {
     pub(crate) recv_flow: ReceiveFlow,
     pub(crate) track_sender: broadcast::Sender<MediaFrame>,
     pub(crate) init_tx: Option<oneshot::Sender<Result<Codec>>>,
 }
 
-impl RtpReceiver {
+impl RtpMediaTrackReceiver {
     pub async fn run(mut self) {
         if let Err(err) = self.run_inner().await {
             let id: u64 = self.recv_flow.flow_id().into();

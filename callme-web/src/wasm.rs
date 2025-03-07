@@ -5,8 +5,7 @@ use serde::Serialize;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber_wasm::MakeConsoleWriter;
 use wasm_bindgen::{prelude::wasm_bindgen, JsError};
-use wasm_streams::readable::sys::ReadableStream as JsReadableStream;
-use wasm_streams::ReadableStream;
+use wasm_streams::{readable::sys::ReadableStream as JsReadableStream, ReadableStream};
 
 use crate::Node;
 

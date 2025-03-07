@@ -5,16 +5,13 @@ use bytes::Bytes;
 use cpal::{ChannelCount, SampleRate};
 use device::Devices;
 
+use self::{
+    device::list_devices, playback::AudioPlayer, record::AudioRecorder, ringbuf_pipe::ringbuf_pipe,
+};
+pub use self::{
+    device::AudioConfig, playback::AudioSource, processor::WebrtcAudioProcessor, record::AudioSink,
+};
 use crate::rtc::MediaTrack;
-
-use self::device::list_devices;
-pub use self::device::AudioConfig;
-use self::playback::AudioPlayer;
-pub use self::playback::AudioSource;
-pub use self::processor::WebrtcAudioProcessor;
-use self::record::AudioRecorder;
-pub use self::record::AudioSink;
-use self::ringbuf_pipe::ringbuf_pipe;
 
 mod device;
 mod playback;
@@ -75,11 +72,14 @@ impl AudioContext {
 mod ringbuf_pipe {
     use std::ops::ControlFlow;
 
-    use super::{AudioSink, AudioSource};
     use anyhow::Result;
-    use ringbuf::traits::{Consumer as _, Observer, Producer as _, Split};
-    use ringbuf::{HeapCons as Consumer, HeapProd as Producer};
+    use ringbuf::{
+        traits::{Consumer as _, Observer, Producer as _, Split},
+        HeapCons as Consumer, HeapProd as Producer,
+    };
     use tracing::warn;
+
+    use super::{AudioSink, AudioSource};
 
     pub struct RingbufSink(Producer<f32>);
     pub struct RingbufSource(Consumer<f32>);

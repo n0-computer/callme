@@ -1,24 +1,32 @@
+use std::{
+    num::NonZeroUsize,
+    ops::ControlFlow,
+    sync::{atomic::AtomicBool, Arc, Mutex},
+    time::{Duration, Instant},
+};
+
 use anyhow::{anyhow, bail, Result};
-use cpal::traits::{DeviceTrait, StreamTrait};
-use cpal::{Device, Sample, SampleFormat};
+use cpal::{
+    traits::{DeviceTrait, StreamTrait},
+    Device, Sample, SampleFormat,
+};
 use fixed_resample::{FixedResampler, ResampleQuality};
-use ringbuf::traits::{Consumer as _, Observer as _, Producer as _, Split};
-use ringbuf::{HeapCons as Consumer, HeapProd as Producer};
-use std::num::NonZeroUsize;
-use std::ops::ControlFlow;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use ringbuf::{
+    traits::{Consumer as _, Observer as _, Producer as _, Split},
+    HeapCons as Consumer, HeapProd as Producer,
+};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, trace, warn, Level};
 
-use crate::codec::opus::MediaTrackOpusDecoder;
-use crate::rtc::{MediaFrame, MediaTrack};
-
-use super::device::{find_device, output_stream_config, Direction};
-use super::processor::WebrtcAudioProcessor;
-use super::OPUS_STREAM_PARAMS;
-use super::{device::StreamInfo, StreamParams, DURATION_10MS, DURATION_20MS, SAMPLE_RATE};
+use super::{
+    device::{find_device, output_stream_config, Direction, StreamInfo},
+    processor::WebrtcAudioProcessor,
+    StreamParams, DURATION_10MS, DURATION_20MS, OPUS_STREAM_PARAMS, SAMPLE_RATE,
+};
+use crate::{
+    codec::opus::MediaTrackOpusDecoder,
+    rtc::{MediaFrame, MediaTrack},
+};
 
 pub trait AudioSource: Send + 'static {
     fn tick(&mut self, buf: &mut [f32]) -> Result<ControlFlow<(), usize>>;

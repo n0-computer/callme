@@ -7,8 +7,7 @@ pub mod app;
 #[no_mangle]
 fn android_main(app: winit::platform::android::activity::AndroidApp) {
     use eframe::{NativeOptions, Renderer};
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 
     std::env::set_var("RUST_BACKTRACE", "full");
     std::env::set_var("RUST_LOG", "debug");

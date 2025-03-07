@@ -2,17 +2,18 @@ use std::{ops::ControlFlow, time::Duration};
 
 use anyhow::{bail, Result};
 use bytes::{Bytes, BytesMut};
-use ringbuf::traits::{Consumer as _, Observer, Producer as _, Split};
-use ringbuf::{HeapCons as Consumer, HeapProd as Producer};
+use ringbuf::{
+    traits::{Consumer as _, Observer, Producer as _, Split},
+    HeapCons as Consumer, HeapProd as Producer,
+};
 use tokio::sync::broadcast;
 use tracing::{info, trace};
 
+use super::Codec;
 use crate::{
     audio::{AudioSink, AudioSource, StreamParams, SAMPLE_RATE},
     rtc::{MediaFrame, MediaTrack, TrackKind},
 };
-
-use super::Codec;
 
 pub const OPUS_STREAM_PARAMS: StreamParams = StreamParams::new(SAMPLE_RATE, 1);
 
@@ -65,9 +66,7 @@ impl MediaTrackOpusDecoder {
 impl AudioSource for MediaTrackOpusDecoder {
     /// Should be called in a 20ms interval with a buf of len 960 * channel_count.
     fn tick(&mut self, buf: &mut [f32]) -> Result<ControlFlow<(), usize>> {
-        // debug_assert!(buf.len() as u32 >= Self::FRAME_SAMPLE_COUNT + self.channels as u32, "buffer too small");
-        self.audio_buf.clear();
-        loop {
+        while self.audio_buf.len() < buf.len() {
             let (skipped_frames, payload) = match self.track.try_recv() {
                 Ok(frame) => {
                     let MediaFrame {
