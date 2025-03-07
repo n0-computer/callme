@@ -3,18 +3,18 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
 use cpal::{ChannelCount, SampleRate};
-use device::{list_input_devices, list_output_devices};
-use processor::Processor;
 
 pub mod debug;
 mod device;
 mod play;
 mod processor;
-mod record;
+pub mod record;
 
 pub use self::device::AudioConfig;
 pub use self::play::AudioPlayer;
+pub use self::processor::Processor;
 pub use self::record::AudioRecorder;
+pub use device::{list_input_devices, list_output_devices};
 
 pub const SAMPLE_RATE: SampleRate = SampleRate(48_000);
 const DURATION_10MS: Duration = Duration::from_millis(10);

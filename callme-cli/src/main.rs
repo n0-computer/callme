@@ -1,10 +1,7 @@
 use anyhow::Context;
 use clap::Parser;
 
-use callme::{
-    audio::{self, list_devices, AudioConfig},
-    net, run, NodeId,
-};
+use callme::{audio::AudioConfig, audio3::AudioContext, net, run, NodeId};
 
 #[derive(Parser, Debug)]
 #[command(about = "Call me iroh", long_about = None)]
@@ -35,12 +32,20 @@ enum Command {
         output_device_2: Option<String>,
     },
     /// Create a debug feedback loop through an in-memory channel.
-    FeedbackDirect,
+    Feedback { mode: Option<FeedbackMode> },
     /// List the available audio devices
     ListDevices,
 }
 
-#[tokio::main]
+#[derive(Debug, Clone, clap::ValueEnum, Default)]
+enum FeedbackMode {
+    Raw,
+    #[default]
+    Processed,
+    Encoded,
+}
+
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
@@ -48,18 +53,21 @@ async fn main() -> anyhow::Result<()> {
         input_device: args.input_device,
         output_device: args.output_device,
     };
-    let ep = net::bind_endpoint().await?;
-    let ep2 = ep.clone();
-    let fut = async move {
+    let mut endpoint_shutdown = None;
+    let fut = async {
         match args.command {
             Command::Accept => {
-                println!("our node id:\n{}", ep.node_id());
-                run::accept(&ep, audio_config, None)
+                let endpoint = net::bind_endpoint().await?;
+                endpoint_shutdown = Some(endpoint.clone());
+                println!("our node id:\n{}", endpoint.node_id());
+                run::accept(&endpoint, audio_config, None)
                     .await
                     .context("accept failed")?;
             }
             Command::Connect { node_id } => {
-                run::connect(&ep, audio_config, node_id, None)
+                let endpoint = net::bind_endpoint().await?;
+                endpoint_shutdown = Some(endpoint.clone());
+                run::connect(&endpoint, audio_config, node_id, None)
                     .await
                     .context("connect failed")?;
             }
@@ -71,31 +79,30 @@ async fn main() -> anyhow::Result<()> {
                     input_device: input_device_2,
                     output_device: output_device_2,
                 };
-                run::feedback(ep, audio_config, audio_config_2)
+                let endpoint = net::bind_endpoint().await?;
+                endpoint_shutdown = Some(endpoint.clone());
+                run::feedback(endpoint, audio_config, audio_config_2)
                     .await
                     .context("feedback failed")?;
             }
-            Command::FeedbackDirect => {
-                audio::debug::feedback()?;
-                // let (streams, _audio_state) = start_audio(Default::default())?;
-                // loop {
-                //     let outbound_item = streams.recorder.recv().await?;
-                //     let inbound_item = match outbound_item {
-                //         audio::OutboundAudio::Opus {
-                //             payload,
-                //             sample_count: _,
-                //         } => audio::InboundAudio::Opus {
-                //             payload,
-                //             // skipped_samples: None,
-                //             skipped_frames: None,
-                //         },
-                //     };
-                //     streams.player.send(inbound_item).await?;
-                // }
+            Command::Feedback { mode } => {
+                // let ctx = AudioContext::new(audio_config).await?;
+                let ctx = AudioContext::new_sync(audio_config)?;
+                let mode = mode.unwrap_or_default();
+                println!("start feedback loop for 5 seconds (mode {mode:?}");
+                match mode {
+                    FeedbackMode::Raw => ctx.feedback_raw(),
+                    FeedbackMode::Processed => ctx.feedback_processed(),
+                    FeedbackMode::Encoded => ctx.feedback_encoded()?,
+                }
+                // std::future::pending::<()>().await;
+                // std::thread::sleep(std::time::Duration::from_secs(5));
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                println!("closing");
+                ctx.ctx().close().await;
             }
             Command::ListDevices => {
-                let devices = list_devices()?;
-                println!("{devices:#?}");
+                AudioContext::log_devices();
             }
         }
         anyhow::Ok(())
@@ -105,7 +112,9 @@ async fn main() -> anyhow::Result<()> {
         res = fut => res?,
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("shutting down");
-            ep2.close().await;
+            if let Some(endpoint) = endpoint_shutdown {
+                endpoint.close().await;
+            }
         }
     }
     Ok(())

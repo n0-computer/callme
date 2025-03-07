@@ -14,10 +14,12 @@ use webrtc_audio_processing::{
 
 // pub use webrtc_audio_processing::NUM_SAMPLES_PER_FRAME;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Processor(Arc<Inner>);
 
+#[derive(derive_more::Debug)]
 struct Inner {
+    #[debug("Processor")]
     inner: Mutex<webrtc_audio_processing::Processor>,
     config: Mutex<Config>,
     capture_delay: AtomicU64,
@@ -36,8 +38,8 @@ impl Processor {
             ..InitializationConfig::default()
         })?;
 
-        let suppression_level =
-            echo_cancellation_suppression_level.unwrap_or(EchoCancellationSuppressionLevel::High);
+        let suppression_level = echo_cancellation_suppression_level
+            .unwrap_or(EchoCancellationSuppressionLevel::Moderate);
         // High pass filter is a prerequisite to running echo cancellation.
         let config = Config {
             echo_cancellation: Some(EchoCancellation {
@@ -48,9 +50,9 @@ impl Processor {
                 enable_extended_filter: true,
             }),
             enable_high_pass_filter: true,
-            noise_suppression: Some(NoiseSuppression {
-                suppression_level: NoiseSuppressionLevel::High,
-            }),
+            // noise_suppression: Some(NoiseSuppression {
+            //     suppression_level: NoiseSuppressionLevel::High,
+            // }),
             ..Config::default()
         };
         processor.set_config(config.clone());

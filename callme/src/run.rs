@@ -6,7 +6,8 @@ use tracing::info;
 
 use crate::{
     audio::{start_audio, AudioConfig},
-    net,
+    audio2::AudioContext,
+    net, rtc,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,12 +33,16 @@ pub async fn accept(
     let node_id = conn.remote_node_id()?;
     info!("accepted connection from {}", node_id.fmt_short());
     send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
-    let (audio_streams, audio_state) = start_audio(audio_config)?;
-    if let Err(err) = net::handle_connection(conn, audio_streams).await {
+    // let (audio_streams, audio_state) = start_audio(audio_config)?;
+    // if let Err(err) = net::handle_connection(conn, audio_streams).await {
+    //     tracing::warn!("connection closed: {err:?}");
+    // }
+    let audio_ctx = AudioContext::new(audio_config).await?;
+    if let Err(err) = rtc::handle_connection(audio_ctx, conn).await {
         tracing::warn!("connection closed: {err:?}");
     }
     send(event_tx.as_ref(), NetEvent::Closed(node_id)).await;
-    drop(audio_state);
+    // drop(audio_state);
     Ok(())
 }
 
@@ -47,16 +52,19 @@ pub async fn connect(
     node_id: NodeId,
     event_tx: Option<async_channel::Sender<NetEvent>>,
 ) -> Result<()> {
+    info!("creating audio context");
+    let audio_ctx = AudioContext::new(audio_config).await?;
+    info!("audio context created");
     let conn = net::connect(ep, node_id).await?;
     send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
     info!(
         "established connection to {}",
         conn.remote_node_id()?.fmt_short()
     );
-    let (audio_streams, audio_state) = start_audio(audio_config)?;
-    net::handle_connection(conn, audio_streams).await?;
+    // let (audio_streams, audio_state) = start_audio(audio_config)?;
+    // net::handle_connection(conn, audio_streams).await?;
+    rtc::handle_connection(audio_ctx, conn).await?;
     send(event_tx.as_ref(), NetEvent::Closed(node_id)).await;
-    drop(audio_state);
     Ok(())
 }
 
