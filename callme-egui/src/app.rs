@@ -164,7 +164,7 @@ impl Worker {
             .await?;
         self.log(format!("our node id: {}", ep.node_id().fmt_short()))
             .await;
-        let devices = callme::audio::list_devices()?;
+        let devices = callme::audio::AudioContext::list_devices().await?;
         self.log(format!("{devices:#?}")).await;
         let audio_config = callme::audio::AudioConfig::default();
         let (accept_event_tx, accept_event_rx) = async_channel::bounded(16);

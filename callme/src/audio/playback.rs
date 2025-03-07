@@ -12,14 +12,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, trace, warn, Level};
 
-use crate::rtc::{Codec, MediaFrame, MediaTrack, OpusChannels};
+use crate::codec::opus::MediaTrackOpusDecoder;
+use crate::rtc::{MediaFrame, MediaTrack};
 
 use super::device::{find_device, output_stream_config, Direction};
 use super::processor::WebrtcAudioProcessor;
 use super::OPUS_STREAM_PARAMS;
-use super::{
-    device::StreamInfo, InboundAudio, StreamParams, DURATION_10MS, DURATION_20MS, SAMPLE_RATE,
-};
+use super::{device::StreamInfo, StreamParams, DURATION_10MS, DURATION_20MS, SAMPLE_RATE};
 
 pub trait AudioSource: Send + 'static {
     fn tick(&mut self, buf: &mut [f32]) -> Result<ControlFlow<(), usize>>;
@@ -276,97 +275,4 @@ fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Def
         },
         None,
     )
-}
-
-struct MediaTrackOpusDecoder {
-    track: MediaTrack,
-    decoder: opus::Decoder,
-    audio_buf: Vec<f32>,
-    decode_buf: Vec<f32>,
-    // channels: OpusChannels,
-}
-
-impl MediaTrackOpusDecoder {
-    pub fn new(track: MediaTrack) -> Result<Self> {
-        let channels = match track.codec() {
-            Codec::Opus { channels } => channels,
-            // _ => bail!("track is not an opus track"),
-        };
-        let decoder =
-            opus::Decoder::new(OPUS_STREAM_PARAMS.sample_rate.0, channels.into()).unwrap();
-        let buffer_size = OPUS_STREAM_PARAMS.frame_buffer_size(DURATION_20MS);
-        let decode_buf = vec![0.; buffer_size];
-        let audio_buf = vec![];
-        Ok(Self {
-            track,
-            decoder,
-            audio_buf,
-            decode_buf,
-            // channels,
-        })
-    }
-}
-
-impl AudioSource for MediaTrackOpusDecoder {
-    /// Should be called in a 20ms interval with a buf of len 960 * channel_count.
-    fn tick(&mut self, buf: &mut [f32]) -> Result<ControlFlow<(), usize>> {
-        // debug_assert!(buf.len() as u32 >= Self::FRAME_SAMPLE_COUNT + self.channels as u32, "buffer too small");
-        self.audio_buf.clear();
-        loop {
-            let (skipped_frames, payload) = match self.track.try_recv() {
-                Ok(frame) => {
-                    let MediaFrame {
-                        payload,
-                        skipped_frames,
-                        ..
-                    } = frame;
-                    trace!("opus decoder: mediatrack recv frame");
-                    (skipped_frames, Some(payload))
-                }
-                Err(broadcast::error::TryRecvError::Empty) => {
-                    trace!("opus decoder: mediatrack recv empty");
-                    break;
-                }
-                Err(broadcast::error::TryRecvError::Lagged(count)) => {
-                    trace!("opus decoder: mediatrack recv lagged {count}");
-                    (Some(count as u32), None)
-                }
-                Err(broadcast::error::TryRecvError::Closed) => {
-                    info!("stop opus to audio loop: media track sender dropped");
-                    return Ok(ControlFlow::Break(()));
-                }
-            };
-            if let Some(skipped_count) = skipped_frames {
-                for _ in 0..skipped_count {
-                    let count = self
-                        .decoder
-                        .decode_float(&[], &mut self.decode_buf, false)?;
-                    self.audio_buf.extend(&self.decode_buf[..count]);
-                    trace!(
-                        "decoder: {count} samples from skipped frames, now at {}",
-                        self.audio_buf.len()
-                    );
-                }
-            }
-            if let Some(payload) = payload {
-                let count = self
-                    .decoder
-                    .decode_float(&payload, &mut self.decode_buf, false)?;
-                self.audio_buf.extend(&self.decode_buf[..count]);
-                trace!(
-                    "decoder: {count} samples from payload, now at {}",
-                    self.audio_buf.len()
-                );
-            }
-        }
-        let len = buf.len().min(self.audio_buf.len());
-        buf[..len].copy_from_slice(&self.audio_buf[..len]);
-        let end = self.audio_buf.len() - len;
-        self.audio_buf.copy_within(end.., 0);
-        self.audio_buf.truncate(self.audio_buf.len() - len);
-
-        // when falling out of sync too much, warn and drop old frames?
-
-        Ok(ControlFlow::Continue(len))
-    }
 }

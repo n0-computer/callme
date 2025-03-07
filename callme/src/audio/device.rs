@@ -44,6 +44,19 @@ pub enum Direction {
     Output,
 }
 
+pub fn list_devices() -> Result<Devices> {
+    let host = cpal::default_host();
+    let input = list_input_devices(&host)?;
+    let output = list_output_devices(&host)?;
+    Ok(Devices { input, output })
+}
+
+#[derive(Debug)]
+pub struct Devices {
+    pub input: Vec<String>,
+    pub output: Vec<String>,
+}
+
 pub fn find_device(host: &cpal::Host, direction: Direction, name: Option<&str>) -> Result<Device> {
     let iter = || match direction {
         Direction::Input => host.input_devices(),

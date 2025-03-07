@@ -1,11 +1,15 @@
-use anyhow::Result;
-use iroh::{Endpoint, NodeId};
+use anyhow::{bail, Context, Result};
+use iroh::{Endpoint, NodeAddr, NodeId};
 use iroh_roq::ALPN;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 use tracing::info;
 
-use crate::{audio::AudioConfig, audio2::AudioContext, net, rtc};
+use crate::{
+    audio::{AudioConfig, AudioContext},
+    net,
+    rtc::{self, RtcConnection},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetEvent {
@@ -22,58 +26,47 @@ async fn send<T>(event_tx: Option<&async_channel::Sender<T>>, event: T) {
 }
 
 pub async fn accept(
-    ep: &Endpoint,
+    endpoint: &Endpoint,
     audio_config: AudioConfig,
     event_tx: Option<async_channel::Sender<NetEvent>>,
 ) -> Result<()> {
-    let conn = net::accept(ep).await?;
+    let mut conn = endpoint.accept().await.context("endpoint died")?.accept()?;
+    if conn.alpn().await? != ALPN {
+        bail!("incoming connection with invalid ALPN");
+    }
+    let conn = conn.await?;
+    let conn = RtcConnection::new(conn);
     let node_id = conn.transport().remote_node_id()?;
     send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
     let audio_ctx = AudioContext::new(audio_config).await?;
-    if let Err(err) = rtc::handle_connection(audio_ctx, conn).await {
+    if let Err(err) = rtc::handle_connection_with_audio_context(audio_ctx, conn).await {
         tracing::warn!("connection closed: {err:?}");
     }
     send(event_tx.as_ref(), NetEvent::Closed(node_id)).await;
     Ok(())
 }
 
-// pub async fn accept(
-//     ep: &Endpoint,
-//     audio_config: AudioConfig,
-//     event_tx: Option<async_channel::Sender<NetEvent>>,
-// ) -> Result<()> {
-//     let conn = net::accept(ep).await?;
-//     let node_id = conn.remote_node_id()?;
-//     info!("accepted connection from {}", node_id.fmt_short());
-//     send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
-//     // let (audio_streams, audio_state) = start_audio(audio_config)?;
-//     // if let Err(err) = net::handle_connection(conn, audio_streams).await {
-//     //     tracing::warn!("connection closed: {err:?}");
-//     // }
-//     let audio_ctx = AudioContext::new(audio_config).await?;
-//     if let Err(err) = rtc::handle_connection(audio_ctx, conn).await {
-//         tracing::warn!("connection closed: {err:?}");
-//     }
-//     send(event_tx.as_ref(), NetEvent::Closed(node_id)).await;
-//     // drop(audio_state);
-//     Ok(())
-// }
-
 pub async fn connect(
-    ep: &Endpoint,
+    endpoint: &Endpoint,
     audio_config: AudioConfig,
-    node_id: NodeId,
+    node_addr: impl Into<NodeAddr>,
     event_tx: Option<async_channel::Sender<NetEvent>>,
 ) -> Result<()> {
-    info!("creating audio context");
-    let audio_ctx = AudioContext::new(audio_config).await?;
+    let node_addr = node_addr.into();
+    let node_id = node_addr.node_id;
     info!("audio context created");
-    let conn = net::connect(ep, node_id).await?;
+    let conn = endpoint.connect(node_addr, ALPN).await?;
+    let conn = RtcConnection::new(conn);
     send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
     info!("established connection to {}", node_id.fmt_short());
-    if let Err(err) = rtc::handle_connection(audio_ctx, conn).await {
+
+    info!("creating audio context");
+    let audio_ctx = AudioContext::new(audio_config).await?;
+
+    if let Err(err) = rtc::handle_connection_with_audio_context(audio_ctx, conn).await {
         tracing::warn!("connection closed: {err:?}");
     }
+
     send(event_tx.as_ref(), NetEvent::Closed(node_id)).await;
     Ok(())
 }
@@ -96,7 +89,7 @@ pub async fn connect_many(
             let conn = net::connect(&ep, node_id).await?;
             send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
             info!("established connection to {}", node_id.fmt_short());
-            if let Err(err) = rtc::handle_connection(audio_ctx, conn).await {
+            if let Err(err) = rtc::handle_connection_with_audio_context(audio_ctx, conn).await {
                 tracing::warn!("connection closed: {err:?}");
             }
             send(event_tx.as_ref(), NetEvent::Closed(node_id)).await;
@@ -126,13 +119,13 @@ pub async fn feedback(
     let accept_task = n0_future::task::spawn(async move {
         let conn = net::accept(&ep1).await?;
         let audio_ctx = AudioContext::new(audio_config).await?;
-        rtc::handle_connection(audio_ctx, conn).await?;
+        rtc::handle_connection_with_audio_context(audio_ctx, conn).await?;
         anyhow::Ok(())
     });
     let connect_task = n0_future::task::spawn(async move {
         let conn = net::connect(&ep2, ep1_addr).await?;
         let audio_ctx = AudioContext::new(audio_config_2).await?;
-        rtc::handle_connection(audio_ctx, conn).await?;
+        rtc::handle_connection_with_audio_context(audio_ctx, conn).await?;
         anyhow::Ok(())
     });
 

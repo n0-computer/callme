@@ -5,9 +5,12 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use callme::{
-    audio::{record::OpusEncoder, OPUS_STREAM_PARAMS},
+    codec::{
+        opus::{OpusChannels, OpusEncoder, OPUS_STREAM_PARAMS},
+        Codec,
+    },
     net::bind_endpoint,
-    rtc::{Codec, MediaFrame, MediaTrack, OpusChannels, RtcConnection, RtcProtocol, TrackKind},
+    rtc::{MediaFrame, MediaTrack, RtcConnection, RtcProtocol, TrackKind},
 };
 use clap::Parser;
 use cpal::Sample;

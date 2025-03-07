@@ -1,11 +1,9 @@
 #![allow(unused_imports)]
 
 pub mod audio;
+pub mod codec;
 pub mod net;
-pub mod run;
-
-pub mod audio2;
-// pub mod audio3;
 pub mod rtc;
+pub mod run;
 
 pub use iroh::NodeId;

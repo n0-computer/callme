@@ -3,36 +3,112 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
 use cpal::{ChannelCount, SampleRate};
+use device::Devices;
+
+use crate::rtc::MediaTrack;
+
+use self::device::list_devices;
+pub use self::device::AudioConfig;
+use self::playback::AudioPlayer;
+pub use self::playback::AudioSource;
+pub use self::processor::WebrtcAudioProcessor;
+use self::record::AudioRecorder;
+pub use self::record::AudioSink;
+use self::ringbuf_pipe::ringbuf_pipe;
 
 pub mod debug;
 mod device;
-pub mod play;
+pub mod playback;
 mod processor;
 pub mod record;
 
-pub use self::device::AudioConfig;
-pub use self::play::AudioPlayer;
-pub use self::processor::WebrtcAudioProcessor;
-pub use self::record::AudioRecorder;
-pub use device::{list_input_devices, list_output_devices};
-
 pub const SAMPLE_RATE: SampleRate = SampleRate(48_000);
-pub const DURATION_10MS: Duration = Duration::from_millis(10);
-pub const DURATION_20MS: Duration = Duration::from_millis(20);
+const DURATION_10MS: Duration = Duration::from_millis(10);
+const DURATION_20MS: Duration = Duration::from_millis(20);
 
-pub const OPUS_STREAM_PARAMS: StreamParams = StreamParams::new(SAMPLE_RATE, 1);
+pub use crate::codec::opus::OPUS_STREAM_PARAMS;
 
-pub fn list_devices() -> Result<Devices> {
-    let host = cpal::default_host();
-    let input = list_input_devices(&host)?;
-    let output = list_output_devices(&host)?;
-    Ok(Devices { input, output })
+#[derive(Debug, Clone)]
+pub struct AudioContext {
+    player: AudioPlayer,
+    recorder: AudioRecorder, // config: Arc<AudioConfig>,
 }
 
-#[derive(Debug)]
-pub struct Devices {
-    pub input: Vec<String>,
-    pub output: Vec<String>,
+impl AudioContext {
+    pub async fn list_devices() -> Result<Devices> {
+        tokio::task::spawn_blocking(|| list_devices()).await?
+    }
+
+    pub async fn new(config: AudioConfig) -> Result<Self> {
+        let host = cpal::default_host();
+        let processor = WebrtcAudioProcessor::new(1, 1, None, config.processing_enabled)?;
+        let recorder =
+            AudioRecorder::build(&host, config.input_device.as_deref(), processor.clone()).await?;
+        let player =
+            AudioPlayer::build(&host, config.output_device.as_deref(), processor.clone()).await?;
+        Ok(Self { player, recorder })
+    }
+
+    pub async fn capture_track(&self) -> Result<MediaTrack> {
+        self.recorder.create_opus_track().await
+    }
+
+    pub async fn play_track(&self, track: MediaTrack) -> Result<()> {
+        self.player.add_track(track).await?;
+        Ok(())
+    }
+
+    pub async fn feedback_encoded(&self) -> Result<()> {
+        let track = self.capture_track().await?;
+        self.play_track(track).await?;
+        Ok(())
+    }
+
+    pub async fn feedback_raw(&self) -> Result<()> {
+        let buffer_size = OPUS_STREAM_PARAMS.frame_buffer_size(DURATION_20MS * 4);
+        let (sink, source) = ringbuf_pipe(buffer_size);
+        self.recorder.add_sink(sink).await?;
+        self.player.add_source(source).await?;
+        Ok(())
+    }
+}
+
+mod ringbuf_pipe {
+    use std::ops::ControlFlow;
+
+    use super::{AudioSink, AudioSource};
+    use anyhow::Result;
+    use ringbuf::traits::{Consumer as _, Observer, Producer as _, Split};
+    use ringbuf::{HeapCons as Consumer, HeapProd as Producer};
+    use tracing::warn;
+
+    pub struct RingbufSink(Producer<f32>);
+    pub struct RingbufSource(Consumer<f32>);
+
+    pub fn ringbuf_pipe(buffer_size: usize) -> (RingbufSink, RingbufSource) {
+        let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
+        (RingbufSink(producer), RingbufSource(consumer))
+    }
+
+    impl AudioSink for RingbufSink {
+        fn tick(&mut self, buf: &[f32]) -> Result<ControlFlow<(), ()>> {
+            let len = self.0.push_slice(&buf);
+            if len < buf.len() {
+                warn!("ringbuf sink xrun: failed to send {}", buf.len() - len);
+            }
+            Ok(ControlFlow::Continue(()))
+        }
+    }
+
+    impl AudioSource for RingbufSource {
+        fn tick(&mut self, buf: &mut [f32]) -> Result<ControlFlow<(), usize>> {
+            let len = self.0.pop_slice(buf);
+            if len < buf.len() {
+                warn!("ringbuf source xrun: failed to recv {}", buf.len() - len);
+            }
+            Ok(ControlFlow::Continue(len))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -65,16 +141,4 @@ impl StreamParams {
     pub const fn frame_buffer_size(&self, duration: Duration) -> usize {
         self.frame_duration_in_samples(duration) * self.channel_count as usize
     }
-}
-
-pub enum OutboundAudio {
-    Opus { payload: Bytes, sample_count: u32 },
-}
-
-pub enum InboundAudio {
-    Opus {
-        payload: Bytes,
-        // skipped_samples: Option<u32>,
-        skipped_frames: Option<u32>,
-    },
 }

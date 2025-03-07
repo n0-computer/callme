@@ -6,7 +6,7 @@ use iroh_roq::rtp::sequence::Sequencer;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::trace;
 
-use super::Codec;
+use crate::codec::Codec;
 
 use anyhow::{anyhow, Result};
 

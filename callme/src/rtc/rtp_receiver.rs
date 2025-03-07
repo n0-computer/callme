@@ -6,9 +6,9 @@ use iroh_roq::rtp::{self, codecs::opus::OpusPacket, packetizer::Depacketizer};
 
 use anyhow::Result;
 
-use super::{Codec, MediaFrame};
-
 use iroh_roq::ReceiveFlow;
+
+use crate::{codec::Codec, rtc::MediaFrame};
 
 pub(crate) struct RtpReceiver {
     pub(crate) recv_flow: ReceiveFlow,
