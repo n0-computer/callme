@@ -4,7 +4,7 @@ use web_audio_api::{
 };
 use webrtc_audio_processing::NUM_SAMPLES_PER_FRAME;
 
-use crate::audio::Processor;
+use crate::audio::WebrtcAudioProcessor;
 
 use super::Interleave;
 
@@ -13,14 +13,14 @@ pub enum Direction {
     Render,
 }
 pub struct WebrtcProcessor {
-    processor: Processor,
+    processor: WebrtcAudioProcessor,
     direction: Direction,
     unprocessed: Vec<f32>,
     processed: Vec<f32>,
 }
 
 impl AudioWorkletProcessor for WebrtcProcessor {
-    type ProcessorOptions = (Processor, Direction);
+    type ProcessorOptions = (WebrtcAudioProcessor, Direction);
 
     fn constructor(opts: Self::ProcessorOptions) -> Self {
         let (processor, direction) = opts;

@@ -9,7 +9,7 @@ use tracing::{trace, warn};
 
 use super::{
     device::{find_device, input_stream_config, output_stream_config, Direction},
-    processor::Processor,
+    processor::WebrtcAudioProcessor,
     DURATION_10MS, DURATION_20MS, OPUS_STREAM_PARAMS,
 };
 
@@ -25,7 +25,7 @@ pub fn feedback() -> anyhow::Result<()> {
     let buffer_size = params.buffer_size(DURATION_20MS) * 16;
     let (mut producer, mut consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
 
-    let processor = Processor::new(1, 1, None)?;
+    let processor = WebrtcAudioProcessor::new(1, 1, None, true)?;
     let processor_clone = processor.clone();
 
     let mut input_buf = Vec::with_capacity(params.buffer_size(DURATION_10MS));

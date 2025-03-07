@@ -7,7 +7,7 @@ use futures_concurrency::future::TryJoin;
 use iroh::endpoint::Connecting;
 use iroh_roq::{Session, VarInt, ALPN};
 use n0_future::TryFutureExt;
-use tracing::{trace, warn};
+use tracing::{info, trace, warn};
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -49,6 +49,7 @@ async fn handle_connection(mut connecting: Connecting, opts: Opts) -> Result<()>
         return Ok(());
     }
     let conn = connecting.await?;
+    info!("new connection from {}", conn.remote_node_id()?);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
 
@@ -79,6 +80,12 @@ async fn handle_connection(mut connecting: Connecting, opts: Opts) -> Result<()>
 
     let send_fut = async move {
         while let Some(packet) = rx.recv().await {
+            trace!(
+                "send packet len {} seq {} ts {}",
+                packet.payload.len(),
+                packet.header.sequence_number,
+                packet.header.timestamp,
+            );
             send_flow.send_rtp(&packet)?;
         }
         anyhow::Ok(())

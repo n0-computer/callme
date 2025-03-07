@@ -12,7 +12,7 @@ pub mod record;
 
 pub use self::device::AudioConfig;
 pub use self::play::AudioPlayer;
-pub use self::processor::Processor;
+pub use self::processor::WebrtcAudioProcessor;
 pub use self::record::AudioRecorder;
 pub use device::{list_input_devices, list_output_devices};
 
@@ -34,15 +34,15 @@ pub struct AudioStreams {
 #[derive(Debug)]
 pub struct AudioState;
 
-pub fn start_audio(config: AudioConfig) -> Result<(AudioStreams, AudioState)> {
-    let host = cpal::default_host();
-    let processor = Processor::new(1, 1, None)?;
-    let player = AudioPlayer::build(&host, config.output_device.as_deref(), processor.clone())?;
-    let recorder = AudioRecorder::build(&host, config.input_device.as_deref(), processor)?;
-    let streams = AudioStreams { recorder, player };
-    let state = AudioState;
-    Ok((streams, state))
-}
+// pub fn start_audio(config: AudioConfig) -> Result<(AudioStreams, AudioState)> {
+//     let host = cpal::default_host();
+//     let processor = WebrtcAudioProcessor::new(1, 1, None)?;
+//     let player = AudioPlayer::build(&host, config.output_device.as_deref(), processor.clone())?;
+//     let recorder = AudioRecorder::build(&host, config.input_device.as_deref(), processor)?;
+//     let streams = AudioStreams { recorder, player };
+//     let state = AudioState;
+//     Ok((streams, state))
+// }
 
 pub fn list_devices() -> Result<Devices> {
     let host = cpal::default_host();

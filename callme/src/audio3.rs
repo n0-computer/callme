@@ -24,7 +24,8 @@ use web_audio_api::{
 
 use crate::{
     audio::{
-        record::OpusFramer, AudioConfig, AudioPlayer, AudioRecorder, OutboundAudio, Processor,
+        record::OpusFramer, AudioConfig, AudioPlayer, AudioRecorder, OutboundAudio,
+        WebrtcAudioProcessor,
     },
     rtc::{Codec, MediaFrame, MediaTrack, OpusChannels, TrackKind},
 };
@@ -43,7 +44,7 @@ type DynAudioNode = Arc<dyn web_audio_api::node::AudioNode + Send + Sync + 'stat
 pub struct AudioContext {
     config: Arc<AudioConfig>,
     ctx: Arc<WebAudioContext>,
-    processor: Processor,
+    processor: WebrtcAudioProcessor,
     #[debug("dyn AudioNode")]
     output: DynAudioNode,
     #[debug("dyn AudioNode")]
@@ -94,7 +95,7 @@ impl AudioContext {
         ctx.set_onstatechange(|event| info!("STATE CHANGE: {event:?}"));
 
         // Setup webrtc audio processor.
-        let processor = Processor::new(2, 2, None)?;
+        let processor = WebrtcAudioProcessor::new(2, 2, None)?;
 
         // Setup output.
         let output_worklet =
@@ -246,7 +247,7 @@ fn log_devices(devices: &[MediaDeviceInfo]) {
 
 fn create_webrtc_processor_node(
     ctx: &WebAudioContext,
-    processor: Processor,
+    processor: WebrtcAudioProcessor,
     direction: Direction,
 ) -> Arc<dyn AudioNode + Send + Sync + 'static> {
     let opts = AudioWorkletNodeOptions {

@@ -3,17 +3,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::Result;
 use n0_future::task::AbortOnDropHandle;
 use tokio::sync::broadcast;
+use tracing::trace;
 
 use crate::{
-    audio::{AudioConfig, AudioPlayer, AudioRecorder, OutboundAudio, Processor},
+    audio::{AudioConfig, AudioPlayer, AudioRecorder, OutboundAudio, WebrtcAudioProcessor},
     rtc::{Codec, MediaFrame, MediaTrack, OpusChannels, TrackKind},
 };
 
 #[derive(Debug, Clone)]
 pub struct AudioContext {
     capture_sender: broadcast::Sender<MediaFrame>,
-    processor: Processor,
     config: Arc<AudioConfig>,
+    player: AudioPlayer,
 }
 
 #[derive(Debug, Clone)]
@@ -24,9 +25,9 @@ pub enum LocalAudioSource {
 impl AudioContext {
     pub async fn new(config: AudioConfig) -> Result<Self> {
         let host = cpal::default_host();
-        let processor = Processor::new(1, 1, None)?;
+        let processor = WebrtcAudioProcessor::new(1, 1, None, config.processing_enabled)?;
         let recorder =
-            AudioRecorder::build(&host, config.input_device.as_deref(), processor.clone())?;
+            AudioRecorder::build(&host, config.input_device.as_deref(), processor.clone()).await?;
         let (capture_sender, _capture_receiver) = broadcast::channel(8);
         tokio::task::spawn({
             let capture_sender = capture_sender.clone();
@@ -36,25 +37,33 @@ impl AudioContext {
                         payload,
                         sample_count,
                     } = frame;
+                    trace!(
+                        "capture sender: sent frame {sample_count} len {}",
+                        payload.len()
+                    );
                     let frame = MediaFrame {
                         payload,
                         sample_count: Some(sample_count),
                         skipped_frames: None,
                         skipped_samples: None,
                     };
-                    capture_sender.send(frame).ok();
+                    if let Err(_err) = capture_sender.send(frame) {
+                        trace!("capture sent to black hole: no receivers")
+                    }
                 }
 
                 anyhow::Ok(())
             }
         });
+        let player =
+            AudioPlayer::build(&host, config.output_device.as_deref(), processor.clone()).await?;
         Ok(Self {
             config: Arc::new(config),
-            processor,
             capture_sender, // capture_context: Default::default(),
+            player,
         })
     }
-    pub fn capture(&self) -> Result<MediaTrack> {
+    pub fn get_track_from_capture(&self) -> Result<MediaTrack> {
         let receiver = self.capture_sender.subscribe();
         let codec = Codec::Opus {
             channels: OpusChannels::Mono,
@@ -63,24 +72,22 @@ impl AudioContext {
         Ok(track)
     }
 
-    pub fn playback(&self, mut track: MediaTrack) -> Result<()> {
-        let host = cpal::default_host();
-        let player = AudioPlayer::build(
-            &host,
-            self.config.output_device.as_deref(),
-            self.processor.clone(),
-        )?;
-        tokio::task::spawn(async move {
-            while let Ok(frame) = track.recv().await {
-                let frame = crate::audio::InboundAudio::Opus {
-                    payload: frame.payload,
-                    skipped_frames: frame.skipped_frames,
-                };
-                player.send(frame).await?;
-            }
-            anyhow::Ok(())
-        });
+    pub async fn add_track_to_playback(&self, track: MediaTrack) -> Result<()> {
+        self.player.add_track(track).await?;
         Ok(())
+    }
+
+    pub async fn feedback_encoded(&self) -> Result<()> {
+        let track = self.get_track_from_capture()?;
+        self.add_track_to_playback(track).await?;
+        Ok(())
+    }
+
+    pub fn feedback_raw(&self) -> Result<()> {
+        unimplemented!()
+    }
+    pub fn feedback_processed(&self) -> Result<()> {
+        unimplemented!()
     }
 }
 // }

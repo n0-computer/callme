@@ -163,16 +163,6 @@ pub enum OpusChannels {
     Stereo = 2,
 }
 
-impl OpusChannels {
-    // fn from_channel_count(count: usize) -> Option<Self> {
-    //     match count {
-    //         1 => Some(Self::Mono),
-    //         2 => Some(Self::Stereo),
-    //         _ => None,
-    //     }
-    // }
-}
-
 impl From<OpusChannels> for opus::Channels {
     fn from(value: OpusChannels) -> Self {
         match value {
@@ -227,11 +217,10 @@ impl Codec {
     }
 }
 
-pub async fn handle_connection(audio_ctx: AudioContext, conn: Connection) -> Result<()> {
-    let conn = RtcConnection::new(conn);
-    let mic_track = audio_ctx.capture()?;
-    conn.send_track(mic_track).await?;
-    info!("added mic track");
+pub async fn handle_connection(audio_ctx: AudioContext, conn: RtcConnection) -> Result<()> {
+    let capture_track = audio_ctx.get_track_from_capture()?;
+    conn.send_track(capture_track).await?;
+    info!("added capture track to rtc connection");
     loop {
         let remote_track = conn.recv_track().await?;
         info!(
@@ -241,143 +230,9 @@ pub async fn handle_connection(audio_ctx: AudioContext, conn: Connection) -> Res
         );
         match remote_track.kind() {
             TrackKind::Audio => {
-                audio_ctx.playback(remote_track)?;
+                audio_ctx.add_track_to_playback(remote_track).await?;
             }
-            TrackKind::Video => todo!(),
+            TrackKind::Video => unimplemented!(),
         }
     }
 }
-
-// // impl  Codec {
-// //     fn kind(&self) -> RtpCodecKind {
-// //         match self {
-
-// //         }
-// //     }
-// // }
-
-// trait TrackLocal: Stream<Item = OutboundFrame> {
-//     fn kind(&self) -> TrackKind;
-// }
-
-// struct OutboundFrame {
-//     data: Bytes,
-// }
-
-// // enum RtpCodec {
-// //     typ: RtpCodecType,
-// //     // Opus {
-// //     //     channels: usize
-// //     // }
-// // }
-
-// // struct TrackLocal{
-// //     packetizer: Packetizer
-// // }
-
-// // struct TrackRemote {}
-
-// // impl TrackLocal {
-// //     fn push_frame()
-// // }
-
-// struct MediaTrack {}
-
-// impl RemoteMediaTrack {
-
-// }
-
-// impl MediaTrack for LocalMediaTrack {
-//     async fn recv(&mut self) -> Result<MediaFrame> {
-//         todo!()
-//     }
-
-//     fn kind(&self) -> TrackKind {
-//         todo!()
-//     }
-
-//     fn codec(&self) -> Codec {
-//         todo!()
-//     }
-//     fn as_local_track(&self) -> Option<&LocalMediaTrack> {
-//         Some(self)
-//     }
-//     fn as_remote_track(&self) -> Option<&RemoteMediaTrack> {
-//         None
-//     }
-// }
-
-// impl MediaTrack for RemoteMediaTrack {
-//     async fn recv(&mut self) -> Result<MediaFrame> {
-//         let frame = self.receiver.recv().await?;
-//         Ok(frame)
-//     }
-
-//     fn kind(&self) -> TrackKind {
-//         self.kind
-//     }
-
-//     fn codec(&self) -> Codec {
-//         self.codec
-//     }
-
-//     fn as_local_track(&self) -> Option<&LocalMediaTrack> {
-//         None
-//     }
-//     fn as_remote_track(&self) -> Option<&RemoteMediaTrack> {
-//         Some(self)
-//     }
-// }
-// trait MediaTrack {
-//     fn recv(&self) -> impl Future<Output = Result<MediaFrame>> + Send;
-//     fn kind(&self) -> TrackKind;
-//     fn codec(&self) -> Codec;
-//     fn as_local_track(&self) -> Option<&LocalMediaTrack>;
-//     fn as_remote_track(&self) -> Option<&RemoteMediaTrack>;
-// }
-
-// use web_audio_api::{
-//     context::{AudioContext, AudioContextOptions},
-//     media_devices::{self, MediaStreamConstraints, MediaTrackConstraints},
-//     media_streams::MediaStream,
-//     node::AudioNode,
-// };
-
-// const SAMPLE_RATE: u32 = 48_000;
-
-// fn foo() {
-//     // Capture microphone input and stream it out to a peer with a processing effect applied to the audio
-//     //     navigator.getUserMedia('audio', gotAudio);
-//     //     function gotAudio(stream) {
-//     //         var microphone = context.createMediaStreamSource(stream);
-//     //         var filter = context.createBiquadFilter();
-//     //         var peer = context.createMediaStreamDestination();
-//     //         microphone.connect(filter);
-//     //         filter.connect(peer);
-//     //         peerConnection.addStream(peer.stream);
-//     //     }
-
-//     let options = AudioContextOptions {
-//         sample_rate: Some(SAMPLE_RATE as f32),
-//         ..Default::default()
-//     };
-//     let context = AudioContext::new(options);
-//     let mic = {
-//         let mut constraints = MediaTrackConstraints::default();
-//         // constraints.device_id = source_id;
-//         // constraints.channel_count = Some(2);
-//         let stream_constraints = MediaStreamConstraints::AudioWithConstraints(constraints);
-//         let media = media_devices::get_user_media_sync(stream_constraints);
-//         context.create_media_stream_source(&media)
-//     };
-
-//     let peer = context.create_media_stream_destination();
-//     peer.set_channel_count(1);
-//     mic.connect(&peer);
-//     let s = peer.stream().clone();
-//     send(s);
-// }
-
-// fn send(audio: MediaStream) {
-//     let track = audio.get_tracks()[0];
-// }

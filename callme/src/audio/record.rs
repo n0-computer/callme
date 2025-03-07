@@ -2,6 +2,7 @@ use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat};
+use dasp_sample::ToSample;
 use fixed_resample::{FixedResampler, ResampleQuality};
 use ringbuf::traits::{Consumer as _, Observer, Producer as _, Split};
 use ringbuf::{HeapCons as Consumer, HeapProd as Producer};
@@ -10,38 +11,70 @@ use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
-use std::time::Instant;
-use tracing::{error, info, trace, warn};
+use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
+use tracing::{error, info, span, trace, warn, Level};
+
+use crate::rtc::OpusChannels;
 
 use super::device::Direction;
 use super::{
     device::{find_device, input_stream_config, StreamInfo},
-    processor::Processor,
+    processor::WebrtcAudioProcessor,
     OutboundAudio, StreamParams, DURATION_10MS, DURATION_20MS, OPUS_STREAM_PARAMS, SAMPLE_RATE,
 };
 
 #[derive(Debug)]
 pub struct AudioRecorder {
     receiver: async_channel::Receiver<OutboundAudio>,
-    // closed: Arc<AtomicBool>,
 }
 
 impl AudioRecorder {
-    pub fn build(host: &cpal::Host, device: Option<&str>, processor: Processor) -> Result<Self> {
+    pub async fn build(
+        host: &cpal::Host,
+        device: Option<&str>,
+        processor: WebrtcAudioProcessor,
+    ) -> Result<Self> {
         let device = find_device(host, Direction::Input, device)?;
         let params = OPUS_STREAM_PARAMS;
         let stream_info = input_stream_config(&device, &params)?;
         let (sender, receiver) = async_channel::bounded(128);
-        let closed = Arc::new(AtomicBool::new(false));
+
+        let capture_params =
+            StreamParams::new(stream_info.config.sample_rate, stream_info.config.channels);
+        let buffer_size = capture_params.buffer_size(DURATION_20MS) * 16;
+        let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
+
+        let encoder = OpusEncoderLoop {
+            consumer,
+            sender,
+            opus_encoder: OpusEncoder::new(OPUS_STREAM_PARAMS),
+            audio_buf: Vec::with_capacity(capture_params.buffer_size(DURATION_20MS)),
+        };
+        let (init_tx, init_rx) = oneshot::channel();
         std::thread::spawn(move || {
-            info!(
-                "spawn record worker: device={} stream_info={stream_info:?}",
-                device.name().unwrap()
-            );
-            if let Err(err) = run(&device, &stream_info, sender, closed, processor) {
+            let stream = match start_record_stream(
+                &device,
+                &stream_info,
+                &capture_params,
+                producer,
+                processor,
+            ) {
+                Ok(stream) => {
+                    init_tx.send(Ok(())).unwrap();
+                    stream
+                }
+                Err(err) => {
+                    init_tx.send(Err(err)).unwrap();
+                    return;
+                }
+            };
+            if let Err(err) = encoder.run() {
                 error!("record worker thread failed: {err:?}");
             }
+            drop(stream);
         });
+        init_rx.await??;
         let handle = AudioRecorder { receiver };
         Ok(handle)
     }
@@ -52,22 +85,26 @@ impl AudioRecorder {
     }
 }
 
-fn run(
+fn start_record_stream(
     device: &Device,
     stream_info: &StreamInfo,
-    sender: async_channel::Sender<OutboundAudio>,
-    closed: Arc<AtomicBool>,
-    processor: Processor,
-) -> Result<()> {
-    let capture_params =
-        StreamParams::new(stream_info.config.sample_rate, stream_info.config.channels);
-    let buffer_size = capture_params.buffer_size(DURATION_20MS) * 16;
-    let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
+    capture_params: &StreamParams,
+    producer: Producer<f32>,
+    processor: WebrtcAudioProcessor,
+) -> Result<cpal::Stream> {
     let config = &stream_info.config;
+    let resampler = FixedResampler::new(
+        NonZeroUsize::new(capture_params.channel_count as usize).unwrap(),
+        capture_params.sample_rate.0,
+        SAMPLE_RATE.0,
+        ResampleQuality::High,
+        true,
+    );
     let state = CaptureState {
         params: capture_params.clone(),
         producer,
         processor: processor.clone(),
+        resampler,
     };
     let stream = match stream_info.sample_format {
         SampleFormat::I8 => build_input_stream::<i8>(&device, &config, state),
@@ -80,36 +117,14 @@ fn run(
         }
     }?;
     stream.play()?;
-
-    // let worker = RecordWorker::new(stream_params, stream, closed, consumer, sender, p);
-
-    let resampler = FixedResampler::new(
-        NonZeroUsize::new(capture_params.channel_count as usize).unwrap(),
-        capture_params.sample_rate.0,
-        SAMPLE_RATE.0,
-        ResampleQuality::High,
-        true,
-    );
-    let worker = RecordWorker {
-        stream,
-        closed,
-        consumer,
-        sender,
-        resampler,
-        opus_encoder: OpusFramer::new(OPUS_STREAM_PARAMS),
-        audio_buf: Vec::with_capacity(capture_params.buffer_size(DURATION_20MS)),
-        resampled_buf: Vec::with_capacity(OPUS_STREAM_PARAMS.buffer_size(DURATION_20MS)),
-        processor,
-    };
-    // this blocks.
-    worker.run()?;
-    Ok(())
+    Ok(stream)
 }
 
 struct CaptureState {
     params: StreamParams,
     producer: Producer<f32>,
-    processor: Processor,
+    processor: WebrtcAudioProcessor,
+    resampler: FixedResampler<f32, 2>,
 }
 
 fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Default>(
@@ -118,10 +133,9 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
     mut state: CaptureState,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let mut tick = 0;
-    // TODO: remove once resampler is readded
-    assert_eq!(state.params.sample_rate, SAMPLE_RATE);
-    let frame_size = state.params.buffer_size(DURATION_10MS);
-    let mut input_buf: Vec<f32> = Vec::with_capacity(frame_size);
+    let processor_frame_size = state.params.buffer_size(DURATION_10MS);
+    let mut input_buf: Vec<f32> = Vec::with_capacity(processor_frame_size);
+    let mut resampled_buf: Vec<f32> = Vec::with_capacity(processor_frame_size);
     device.build_input_stream::<S, _, _>(
         config,
         move |data: &[S], info: &_| {
@@ -129,49 +143,50 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
                 info!("record stream started. len={}", data.len());
             }
 
+            // adjust sample format
+            input_buf.extend(data.iter().map(|s| s.to_sample()));
+            // resample
+            state.resampler.process_interleaved(
+                &input_buf[..],
+                |samples| {
+                    resampled_buf.extend(samples);
+                },
+                None,
+                false,
+            );
+            input_buf.clear();
+
+            // record delay for processor
             let capture_delay = info
                 .timestamp()
                 .callback
                 .duration_since(&info.timestamp().capture)
                 .unwrap_or_default();
-            state.processor.set_capture_delay(capture_delay);
-
-            for s in data {
-                input_buf.push(s.to_sample());
-                if input_buf.len() == frame_size {
-                    state
-                        .processor
-                        .process_capture_frame(&mut input_buf[..])
-                        .unwrap();
-                    let n = state.producer.push_slice(&input_buf);
-                    if n < data.len() {
-                        warn!(
-                            "record overflow: failed to push {} of {}",
-                            data.len() - n,
-                            data.len()
-                        );
-                    }
-                    input_buf.clear();
+            let resampler_delay =
+                Duration::from_secs_f32(state.resampler.output_delay() as f32 / 48_000f32);
+            // let capture_delay = capture_delay + state.resampler.output_delay();
+            state
+                .processor
+                .set_capture_delay(capture_delay + resampler_delay);
+            // process
+            let mut chunks = resampled_buf.chunks_exact_mut(processor_frame_size);
+            for chunk in &mut chunks {
+                state.processor.process_capture_frame(chunk).unwrap();
+                let n = state.producer.push_slice(&chunk);
+                if n < chunk.len() {
+                    warn!(
+                        "record xrun: failed to push out {} of {}",
+                        chunk.len() - n,
+                        chunk.len()
+                    );
                 }
             }
-            // for (_i, sample) in data.iter().enumerate() {
-            //     buf.push(sample.to_sample());
-            //     if buf.len() == buf_size {
-            //         state
-            //             .processor
-            //             .process_render_frame(&mut buf)
-            //             .expect("record: failed to run processor");
-            //         let n = state.producer.push_slice(&buf);
-            //         if n < buf.len() {
-            //             warn!(
-            //                 "record stream underflow at tick {tick}, failed to push {} of {}",
-            //                 buf.len() - n,
-            //                 buf.len()
-            //             );
-            //         }
-            //         buf.clear();
-            //     }
-            // }
+            // cleanup
+            let remainder_len = chunks.into_remainder().len();
+            let end = resampled_buf.len() - remainder_len;
+            resampled_buf.copy_within(end.., 0);
+            resampled_buf.truncate(remainder_len);
+
             tick += 1;
         },
         |err| {
@@ -182,47 +197,23 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
 }
 
 #[allow(unused)]
-struct RecordWorker {
-    stream: cpal::Stream,
-    closed: Arc<AtomicBool>,
+struct OpusEncoderLoop {
     consumer: Consumer<f32>,
     sender: async_channel::Sender<OutboundAudio>,
-    resampler: FixedResampler<f32, 2>,
-    processor: Processor,
-    opus_encoder: OpusFramer,
+    opus_encoder: OpusEncoder,
     audio_buf: Vec<f32>,
-    resampled_buf: Vec<f32>,
 }
 
-impl RecordWorker {
+impl OpusEncoderLoop {
     pub fn run(mut self) -> Result<()> {
-        let mut tick = 0;
-        loop {
+        let span = span!(Level::TRACE, "opus-encoder");
+        let _guard = span.enter();
+
+        'outer: loop {
             let start = Instant::now();
-            if self.process(tick)?.is_break() {
-                tracing::info!("closing recorder: input receiver closed.");
-                break;
-            }
-            if self.consumer.is_empty() {
-                let sleep_time = (start + DURATION_10MS).saturating_duration_since(Instant::now());
-                std::thread::sleep(sleep_time);
-            }
-            tick += 1;
-        }
-        Ok(())
-    }
 
-    pub fn process(&mut self, tick: usize) -> Result<ControlFlow<()>> {
-        self.audio_buf.clear();
-        for sample in self.consumer.pop_iter() {
-            self.audio_buf.push(sample);
-        }
-        if self.audio_buf.is_empty() {
-            return Ok(ControlFlow::Continue(()));
-        }
-
-        for sample in &self.audio_buf {
-            if let Some((payload, sample_count)) = self.opus_encoder.push_sample(*sample) {
+            for (payload, sample_count) in self.opus_encoder.push_from_consumer(&mut self.consumer)
+            {
                 let payload_len = payload.len();
                 let frame = OutboundAudio::Opus {
                     payload,
@@ -230,26 +221,30 @@ impl RecordWorker {
                 };
                 match self.sender.force_send(frame) {
                     Ok(None) => {
-                        trace!("recorder[{tick}]: sent opus {sample_count}S {payload_len}B")
+                        trace!("sent opus {sample_count}S {payload_len}B")
                     }
                     Ok(Some(_)) => warn!("record channel full, dropping oldest frame"),
-                    Err(_) => return Ok(ControlFlow::Break(())),
+                    Err(_) => {
+                        tracing::info!("closing encoder loop: track receiver closed.");
+                        break 'outer;
+                    }
                 }
             }
+            let sleep_time = DURATION_20MS.saturating_sub(start.elapsed());
+            std::thread::sleep(sleep_time);
         }
-
-        Ok(ControlFlow::Continue(()))
+        Ok(())
     }
 }
 
-pub struct OpusFramer {
+pub struct OpusEncoder {
     encoder: opus::Encoder,
     samples: Vec<f32>,
     out_buf: BytesMut,
     samples_per_frame: usize,
 }
 
-impl OpusFramer {
+impl OpusEncoder {
     pub fn new(params: StreamParams) -> Self {
         let samples_per_frame = params.buffer_size(DURATION_20MS);
         tracing::info!("recorder: opus params {params:?}");
@@ -271,6 +266,23 @@ impl OpusFramer {
         }
     }
 
+    pub fn push_from_consumer<'a>(
+        &'a mut self,
+        consumer: &'a mut Consumer<f32>,
+    ) -> impl Iterator<Item = (Bytes, u32)> + 'a {
+        std::iter::from_fn(|| {
+            if consumer.is_empty() {
+                return None;
+            }
+            for sample in consumer.pop_iter() {
+                if let Some((payload, sample_count)) = self.push_sample(sample) {
+                    return Some((payload, sample_count));
+                }
+            }
+            None
+        })
+    }
+
     pub fn push_sample(&mut self, sample: f32) -> Option<(Bytes, u32)> {
         self.samples.push(sample);
         if self.samples.len() >= self.samples_per_frame {
@@ -288,71 +300,3 @@ impl OpusFramer {
         }
     }
 }
-
-// capture time notes
-// let capture_time_ns = info.timestamp().callback.as_nanos();
-// let now_host_time = cap::cidre::cv::current_host_time();
-// let now_time_ns = host_time_to_stream_instant(now_host_time).as_nanos();
-// let device_latency_us = 1e-3 * (now_time_ns - capture_time_ns) as f64;
-
-// let buffer_latency_us = 1.0e6 * self.producer.occupied_len() as f64
-//     / self.params.sample_rate.0 as f64
-//     / self.params.channel_count as f64
-//     + 0.5;
-
-// let capture_total_delay =
-//     1e-3 * (buffer_latency_us + device_latency_us as f64) + 0.5;
-// self.capture_delay_ms
-//     .store(capture_total_delay as u64, Ordering::Relaxed);
-
-// old  worker
-// self.resampler.process_interleaved(
-//     &self.audio_buf,
-//     |samples| {
-//         self.resampled_buf.extend(samples);
-//     },
-//     None,
-//     false,
-// );
-
-// let chunk_size = OPUS_STREAM_PARAMS.buffer_size(DURATION_10MS);
-// let mut stopped_after = None;
-// for (i, frame) in self.resampled_buf.chunks_mut(chunk_size).enumerate() {
-//     if frame.len() == chunk_size {
-//         self.processor.process_capture_frame(frame)?;
-//     } else {
-//         stopped_after = Some(i);
-//         break;
-//     }
-
-//     for sample in frame {
-//         if let Some((payload, sample_count)) = self.opus_encoder.push_sample(*sample) {
-//             let payload_len = payload.len();
-//             let frame = OutboundAudio::Opus {
-//                 payload,
-//                 sample_count,
-//             };
-//             match self.sender.force_send(frame) {
-//                 Ok(None) => {
-//                     trace!("recorder[{tick}]: sent opus {sample_count}S {payload_len}B")
-//                 }
-//                 Ok(Some(_)) => warn!("record channel full, dropping oldest frame"),
-//                 Err(_) => return Ok(ProcessOutcome::ChannelClosed),
-//             }
-//         }
-//     }
-// }
-
-// if let Some(i) = stopped_after {
-//     let reminder_start = chunk_size * i;
-//     let reminder_len = self.resampled_buf.len() - reminder_start;
-//     self.resampled_buf.copy_within(reminder_start.., 0);
-//     self.resampled_buf.truncate(reminder_len);
-// } else {
-//     self.resampled_buf.clear();
-// }
-// trace!(
-//     "recorder[{tick}]: processing {} resampled {} ",
-//     self.audio_buf.len(),
-//     self.resampled_buf.len()
-// );

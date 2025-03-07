@@ -15,6 +15,7 @@ pub struct AudioConfig {
     pub input_device: Option<String>,
     /// The output device to use.
     pub output_device: Option<String>,
+    pub processing_enabled: bool,
 }
 
 impl Default for AudioConfig {
@@ -32,6 +33,7 @@ impl Default for AudioConfig {
         Self {
             input_device,
             output_device,
+            processing_enabled: true,
         }
     }
 }
