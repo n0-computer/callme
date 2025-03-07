@@ -1,17 +1,18 @@
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, Sample, SampleFormat};
 use fixed_resample::{FixedResampler, ResampleQuality};
 use ringbuf::traits::{Consumer as _, Observer as _, Producer as _, Split};
 use ringbuf::{HeapCons as Consumer, HeapProd as Producer};
 use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, trace, warn, Level};
 
-use crate::rtc::{Codec, MediaFrame, MediaTrack};
+use crate::rtc::{Codec, MediaFrame, MediaTrack, OpusChannels};
 
 use super::device::{find_device, output_stream_config, Direction};
 use super::processor::WebrtcAudioProcessor;
@@ -20,9 +21,13 @@ use super::{
     device::StreamInfo, InboundAudio, StreamParams, DURATION_10MS, DURATION_20MS, SAMPLE_RATE,
 };
 
+pub trait AudioSource: Send + 'static {
+    fn tick(&mut self, buf: &mut [f32]) -> Result<ControlFlow<(), usize>>;
+}
+
 #[derive(derive_more::Debug, Clone)]
 pub struct AudioPlayer {
-    track_sender: mpsc::Sender<MediaTrack>,
+    source_sender: mpsc::Sender<Box<dyn AudioSource>>,
 }
 
 impl AudioPlayer {
@@ -35,10 +40,10 @@ impl AudioPlayer {
         let stream_info = output_stream_config(&device, &OPUS_STREAM_PARAMS)?;
 
         let params = StreamParams::new(stream_info.config.sample_rate, stream_info.config.channels);
-        let buffer_size = params.buffer_size(DURATION_20MS) * 4;
+        let buffer_size = params.frame_buffer_size(DURATION_20MS) * 4;
         let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
 
-        let (track_sender, track_receiver) = mpsc::channel(16);
+        let (source_sender, track_receiver) = mpsc::channel(16);
         let (init_tx, init_rx) = oneshot::channel();
 
         std::thread::spawn(move || {
@@ -53,36 +58,52 @@ impl AudioPlayer {
                         return;
                     }
                 };
-            playback_mixer_loop(producer, track_receiver);
+            playback_loop(params, producer, track_receiver);
             drop(stream);
         });
 
         init_rx.await??;
-        Ok(AudioPlayer { track_sender })
+        Ok(AudioPlayer { source_sender })
     }
 
     pub async fn add_track(&self, track: MediaTrack) -> Result<()> {
-        self.track_sender.send(track).await?;
+        let decoder = MediaTrackOpusDecoder::new(track)?;
+        self.add_source(decoder).await
+    }
+
+    pub async fn add_source(&self, source: impl AudioSource) -> Result<()> {
+        self.source_sender
+            .send(Box::new(source))
+            .await
+            .map_err(|_| anyhow!("failed to add audio source: playback loop dead"))?;
         Ok(())
     }
 }
 
-fn playback_mixer_loop(
+fn playback_loop(
+    params: StreamParams,
     mut producer: Producer<f32>,
-    mut track_receiver: mpsc::Receiver<MediaTrack>,
+    mut source_receiver: mpsc::Receiver<Box<dyn AudioSource>>,
 ) {
-    let mut decoders = vec![];
-    let mut buf = vec![];
-    let span = tracing::span!(Level::TRACE, "output-mixer");
+    let span = tracing::span!(Level::TRACE, "playback-loop");
     let _guard = span.enter();
-    info!("playback mixer loop start");
+    info!("playback loop start");
+
+    let tick_duration = DURATION_20MS;
+    let frame_size = params.frame_buffer_size(tick_duration);
+    let mut work_buf = vec![0.; frame_size];
+    let mut out_buf = vec![0.; frame_size];
+    let mut sources = vec![];
+
     loop {
         let start = Instant::now();
+
+        // pull incoming sources
         loop {
-            match track_receiver.try_recv() {
-                Ok(track) => {
+            match source_receiver.try_recv() {
+                Ok(source) => {
                     info!("add new track to decoder");
-                    decoders.push(MediaTrackOpusDecoder::new(track));
+                    sources.push(source);
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -92,34 +113,34 @@ fn playback_mixer_loop(
             }
         }
 
-        decoders.retain_mut(|decoder| match decoder.tick() {
-            Ok(None) => {
-                debug!("remove decoder: track closed");
+        out_buf.fill(0.);
+        sources.retain_mut(|source| match source.tick(&mut work_buf) {
+            Ok(ControlFlow::Continue(count)) => {
+                for i in 0..count {
+                    out_buf[i] += work_buf[i];
+                }
+                true
+            }
+            Ok(ControlFlow::Break(())) => {
+                debug!("remove decoder: closed");
                 false
             }
-            Ok(Some(_)) => true,
             Err(err) => {
-                debug!("remove decoder: failed {err:?}");
+                warn!("remove decoder: failed {err:?}");
                 false
             }
         });
 
-        let max_len = 960;
-        buf.clear();
-        buf.resize(max_len, 0f32);
-        for (i, decoder) in decoders.iter_mut().enumerate() {
-            let slice = decoder.samples(max_len);
-            trace!("decoder {i}: added {} samples", slice.len());
-            for (i, sample) in slice.iter().enumerate() {
-                buf[i] += sample;
-            }
-        }
-        let len = producer.push_slice(&buf[..]);
-        if len < buf.len() {
-            warn!("xrun: failed to push {} of {}", buf.len() - len, buf.len());
+        let len = producer.push_slice(&out_buf[..]);
+        if len < out_buf.len() {
+            warn!(
+                "xrun: failed to push {} of {}",
+                out_buf.len() - len,
+                out_buf.len()
+            );
         }
 
-        let sleep_time = DURATION_20MS.saturating_sub(start.elapsed());
+        let sleep_time = tick_duration.saturating_sub(start.elapsed());
         trace!("sleep {sleep_time:?}");
         std::thread::sleep(sleep_time);
     }
@@ -173,7 +194,7 @@ fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Def
     config: &cpal::StreamConfig,
     mut state: PlaybackState,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
-    let frame_size = state.params.buffer_size(DURATION_10MS);
+    let frame_size = state.params.frame_buffer_size(DURATION_10MS);
     let mut unprocessed: Vec<f32> = Vec::with_capacity(frame_size);
     let mut processed: Vec<f32> = Vec::with_capacity(frame_size);
     let mut resampled: Vec<f32> = Vec::with_capacity(frame_size);
@@ -262,27 +283,34 @@ struct MediaTrackOpusDecoder {
     decoder: opus::Decoder,
     audio_buf: Vec<f32>,
     decode_buf: Vec<f32>,
+    // channels: OpusChannels,
 }
 
 impl MediaTrackOpusDecoder {
-    pub fn new(track: MediaTrack) -> Self {
+    pub fn new(track: MediaTrack) -> Result<Self> {
         let channels = match track.codec() {
             Codec::Opus { channels } => channels,
+            // _ => bail!("track is not an opus track"),
         };
-        let decoder = opus::Decoder::new(SAMPLE_RATE.0, channels.into()).unwrap();
-        let buffer_size = OPUS_STREAM_PARAMS.buffer_size(DURATION_20MS);
-        let audio_buf = vec![];
+        let decoder =
+            opus::Decoder::new(OPUS_STREAM_PARAMS.sample_rate.0, channels.into()).unwrap();
+        let buffer_size = OPUS_STREAM_PARAMS.frame_buffer_size(DURATION_20MS);
         let decode_buf = vec![0.; buffer_size];
-        Self {
+        let audio_buf = vec![];
+        Ok(Self {
             track,
             decoder,
             audio_buf,
             decode_buf,
-        }
+            // channels,
+        })
     }
+}
 
-    /// Should be called in a 20ms interval.
-    pub fn tick(&mut self) -> Result<Option<usize>> {
+impl AudioSource for MediaTrackOpusDecoder {
+    /// Should be called in a 20ms interval with a buf of len 960 * channel_count.
+    fn tick(&mut self, buf: &mut [f32]) -> Result<ControlFlow<(), usize>> {
+        // debug_assert!(buf.len() as u32 >= Self::FRAME_SAMPLE_COUNT + self.channels as u32, "buffer too small");
         self.audio_buf.clear();
         loop {
             let (skipped_frames, payload) = match self.track.try_recv() {
@@ -292,20 +320,20 @@ impl MediaTrackOpusDecoder {
                         skipped_frames,
                         ..
                     } = frame;
-                    tracing::trace!("opus decoder: mediatrack recv frame");
+                    trace!("opus decoder: mediatrack recv frame");
                     (skipped_frames, Some(payload))
                 }
                 Err(broadcast::error::TryRecvError::Empty) => {
-                    tracing::trace!("opus decoder: mediatrack recv empty");
+                    trace!("opus decoder: mediatrack recv empty");
                     break;
                 }
                 Err(broadcast::error::TryRecvError::Lagged(count)) => {
-                    tracing::trace!("opus decoder: mediatrack recv lagged {count}");
+                    trace!("opus decoder: mediatrack recv lagged {count}");
                     (Some(count as u32), None)
                 }
                 Err(broadcast::error::TryRecvError::Closed) => {
                     info!("stop opus to audio loop: media track sender dropped");
-                    return Ok(None);
+                    return Ok(ControlFlow::Break(()));
                 }
             };
             if let Some(skipped_count) = skipped_frames {
@@ -331,11 +359,14 @@ impl MediaTrackOpusDecoder {
                 );
             }
         }
-        Ok(Some(self.audio_buf.len()))
-    }
+        let len = buf.len().min(self.audio_buf.len());
+        buf[..len].copy_from_slice(&self.audio_buf[..len]);
+        let end = self.audio_buf.len() - len;
+        self.audio_buf.copy_within(end.., 0);
+        self.audio_buf.truncate(self.audio_buf.len() - len);
 
-    pub fn samples(&mut self, count: usize) -> &[f32] {
-        let len = count.min(self.audio_buf.len());
-        &self.audio_buf[..len]
+        // when falling out of sync too much, warn and drop old frames?
+
+        Ok(ControlFlow::Continue(len))
     }
 }

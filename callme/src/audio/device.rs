@@ -103,7 +103,7 @@ pub fn input_stream_config(device: &Device, params: &StreamParams) -> Result<Str
     info!("final input config: {config:?}");
     let sample_format = config.sample_format();
     let mut config: cpal::StreamConfig = config.into();
-    config.buffer_size = BufferSize::Fixed(params.buffer_size(DURATION_20MS) as u32);
+    config.buffer_size = BufferSize::Fixed(params.frame_buffer_size(DURATION_20MS) as u32);
     Ok(StreamInfo {
         sample_format,
         config,
@@ -135,7 +135,7 @@ pub fn output_stream_config(device: &Device, params: &StreamParams) -> Result<St
     info!("final output config: {config:?}");
     let sample_format = config.sample_format();
     let mut config: cpal::StreamConfig = config.into();
-    config.buffer_size = BufferSize::Fixed(params.buffer_size(DURATION_20MS) as u32);
+    config.buffer_size = BufferSize::Fixed(params.frame_buffer_size(DURATION_20MS) as u32);
     Ok(StreamInfo {
         sample_format,
         config,

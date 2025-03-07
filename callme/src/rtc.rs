@@ -218,7 +218,7 @@ impl Codec {
 }
 
 pub async fn handle_connection(audio_ctx: AudioContext, conn: RtcConnection) -> Result<()> {
-    let capture_track = audio_ctx.get_track_from_capture()?;
+    let capture_track = audio_ctx.capture_track().await?;
     conn.send_track(capture_track).await?;
     info!("added capture track to rtc connection");
     loop {
@@ -230,7 +230,7 @@ pub async fn handle_connection(audio_ctx: AudioContext, conn: RtcConnection) -> 
         );
         match remote_track.kind() {
             TrackKind::Audio => {
-                audio_ctx.add_track_to_playback(remote_track).await?;
+                audio_ctx.play_track(remote_track).await?;
             }
             TrackKind::Video => unimplemented!(),
         }

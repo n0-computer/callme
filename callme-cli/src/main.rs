@@ -43,9 +43,8 @@ enum Command {
 
 #[derive(Debug, Clone, clap::ValueEnum, Default)]
 enum FeedbackMode {
-    Raw,
     #[default]
-    Processed,
+    Raw,
     Encoded,
 }
 
@@ -104,8 +103,7 @@ async fn main() -> anyhow::Result<()> {
                 let mode = mode.unwrap_or_default();
                 println!("start feedback loop for 5 seconds (mode {mode:?}");
                 match mode {
-                    FeedbackMode::Raw => ctx.feedback_raw()?,
-                    FeedbackMode::Processed => ctx.feedback_processed()?,
+                    FeedbackMode::Raw => ctx.feedback_raw().await?,
                     FeedbackMode::Encoded => ctx.feedback_encoded().await?,
                 }
                 // // std::future::pending::<()>().await;

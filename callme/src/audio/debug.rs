@@ -22,14 +22,14 @@ pub fn feedback() -> anyhow::Result<()> {
     let input_info = input_stream_config(&input_device, &params)?;
     let output_info = output_stream_config(&output_device, &params)?;
 
-    let buffer_size = params.buffer_size(DURATION_20MS) * 16;
+    let buffer_size = params.frame_buffer_size(DURATION_20MS) * 16;
     let (mut producer, mut consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
 
     let processor = WebrtcAudioProcessor::new(1, 1, None, true)?;
     let processor_clone = processor.clone();
 
-    let mut input_buf = Vec::with_capacity(params.buffer_size(DURATION_10MS));
-    let frame_size = params.buffer_size(DURATION_10MS);
+    let mut input_buf = Vec::with_capacity(params.frame_buffer_size(DURATION_10MS));
+    let frame_size = params.frame_buffer_size(DURATION_10MS);
     let input_stream = input_device.build_input_stream(
         &input_info.config,
         move |data: &[f32], _info: &_| {
@@ -54,8 +54,8 @@ pub fn feedback() -> anyhow::Result<()> {
     )?;
 
     let processor = processor_clone;
-    let mut unprocessed: Vec<f32> = Vec::with_capacity(params.buffer_size(DURATION_10MS));
-    let mut processed: Vec<f32> = Vec::with_capacity(params.buffer_size(DURATION_10MS));
+    let mut unprocessed: Vec<f32> = Vec::with_capacity(params.frame_buffer_size(DURATION_10MS));
+    let mut processed: Vec<f32> = Vec::with_capacity(params.frame_buffer_size(DURATION_10MS));
     // let buf_size = frame_size;
     let output_stream = input_device.build_output_stream(
         &output_info.config,

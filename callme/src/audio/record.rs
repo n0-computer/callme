@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use bytes::{Bytes, BytesMut};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat};
@@ -12,10 +12,10 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::oneshot;
-use tracing::{error, info, span, trace, warn, Level};
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::{debug, error, info, span, trace, warn, Level};
 
-use crate::rtc::OpusChannels;
+use crate::rtc::{Codec, MediaFrame, MediaTrack, OpusChannels, TrackKind};
 
 use super::device::Direction;
 use super::{
@@ -24,9 +24,13 @@ use super::{
     OutboundAudio, StreamParams, DURATION_10MS, DURATION_20MS, OPUS_STREAM_PARAMS, SAMPLE_RATE,
 };
 
-#[derive(Debug)]
+pub trait AudioSink: Send + 'static {
+    fn tick(&mut self, buf: &[f32]) -> Result<ControlFlow<(), ()>>;
+}
+
+#[derive(Debug, Clone)]
 pub struct AudioRecorder {
-    receiver: async_channel::Receiver<OutboundAudio>,
+    sink_sender: mpsc::Sender<Box<dyn AudioSink>>,
 }
 
 impl AudioRecorder {
@@ -38,19 +42,14 @@ impl AudioRecorder {
         let device = find_device(host, Direction::Input, device)?;
         let params = OPUS_STREAM_PARAMS;
         let stream_info = input_stream_config(&device, &params)?;
-        let (sender, receiver) = async_channel::bounded(128);
 
         let capture_params =
             StreamParams::new(stream_info.config.sample_rate, stream_info.config.channels);
-        let buffer_size = capture_params.buffer_size(DURATION_20MS) * 16;
+        let buffer_size = capture_params.frame_buffer_size(DURATION_20MS) * 16;
         let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
 
-        let encoder = OpusEncoderLoop {
-            consumer,
-            sender,
-            opus_encoder: OpusEncoder::new(OPUS_STREAM_PARAMS),
-            audio_buf: Vec::with_capacity(capture_params.buffer_size(DURATION_20MS)),
-        };
+        let (sink_sender, sink_receiver) = mpsc::channel(16);
+
         let (init_tx, init_rx) = oneshot::channel();
         std::thread::spawn(move || {
             let stream = match start_record_stream(
@@ -69,19 +68,25 @@ impl AudioRecorder {
                     return;
                 }
             };
-            if let Err(err) = encoder.run() {
-                error!("record worker thread failed: {err:?}");
-            }
+            capture_loop(params, consumer, sink_receiver);
             drop(stream);
         });
         init_rx.await??;
-        let handle = AudioRecorder { receiver };
+        let handle = AudioRecorder { sink_sender };
         Ok(handle)
     }
 
-    pub async fn recv(&self) -> Result<OutboundAudio> {
-        let frame = self.receiver.recv().await?;
-        Ok(frame)
+    pub async fn add_sink(&self, sink: impl AudioSink) -> Result<()> {
+        self.sink_sender
+            .send(Box::new(sink))
+            .await
+            .map_err(|_| anyhow!("failed to add captue sink: capture loop dead"))
+    }
+
+    pub async fn create_opus_track(&self) -> Result<MediaTrack> {
+        let (encoder, track) = MediaTrackOpusEncoder::new(16, OPUS_STREAM_PARAMS)?;
+        self.add_sink(encoder).await?;
+        Ok(track)
     }
 }
 
@@ -133,7 +138,7 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
     mut state: CaptureState,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let mut tick = 0;
-    let processor_frame_size = state.params.buffer_size(DURATION_10MS);
+    let processor_frame_size = state.params.frame_buffer_size(DURATION_10MS);
     let mut input_buf: Vec<f32> = Vec::with_capacity(processor_frame_size);
     let mut resampled_buf: Vec<f32> = Vec::with_capacity(processor_frame_size);
     device.build_input_stream::<S, _, _>(
@@ -196,44 +201,98 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
     )
 }
 
-#[allow(unused)]
-struct OpusEncoderLoop {
-    consumer: Consumer<f32>,
-    sender: async_channel::Sender<OutboundAudio>,
-    opus_encoder: OpusEncoder,
-    audio_buf: Vec<f32>,
-}
+fn capture_loop(
+    params: StreamParams,
+    mut consumer: Consumer<f32>,
+    mut sink_receiver: mpsc::Receiver<Box<dyn AudioSink>>,
+) {
+    let span = tracing::span!(Level::TRACE, "capture-loop");
+    let _guard = span.enter();
+    info!("capture loop start");
 
-impl OpusEncoderLoop {
-    pub fn run(mut self) -> Result<()> {
-        let span = span!(Level::TRACE, "opus-encoder");
-        let _guard = span.enter();
+    let tick_duration = DURATION_20MS;
+    let frame_size = params.frame_buffer_size(tick_duration);
+    let mut buf = vec![0.; frame_size];
+    let mut sinks = vec![];
+    loop {
+        let start = Instant::now();
 
-        'outer: loop {
-            let start = Instant::now();
-
-            for (payload, sample_count) in self.opus_encoder.push_from_consumer(&mut self.consumer)
-            {
-                let payload_len = payload.len();
-                let frame = OutboundAudio::Opus {
-                    payload,
-                    sample_count,
-                };
-                match self.sender.force_send(frame) {
-                    Ok(None) => {
-                        trace!("sent opus {sample_count}S {payload_len}B")
-                    }
-                    Ok(Some(_)) => warn!("record channel full, dropping oldest frame"),
-                    Err(_) => {
-                        tracing::info!("closing encoder loop: track receiver closed.");
-                        break 'outer;
-                    }
+        // poll incoming sources
+        loop {
+            match sink_receiver.try_recv() {
+                Ok(sink) => {
+                    info!("add new track to decoder");
+                    sinks.push(sink);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    info!("stop playback mixer loop: channel closed");
+                    return;
                 }
             }
-            let sleep_time = DURATION_20MS.saturating_sub(start.elapsed());
-            std::thread::sleep(sleep_time);
         }
-        Ok(())
+        let count = consumer.pop_slice(&mut buf);
+
+        sinks.retain_mut(|sink| match sink.tick(&buf[..count]) {
+            Ok(ControlFlow::Continue(())) => true,
+            Ok(ControlFlow::Break(())) => {
+                debug!("remove decoder: closed");
+                false
+            }
+            Err(err) => {
+                warn!("remove decoder: failed {err:?}");
+                false
+            }
+        });
+        let sleep_time = tick_duration.saturating_sub(start.elapsed());
+        trace!("sleep {sleep_time:?}");
+        std::thread::sleep(sleep_time);
+    }
+}
+
+pub struct MediaTrackOpusEncoder {
+    sender: broadcast::Sender<MediaFrame>,
+    encoder: OpusEncoder,
+}
+
+impl MediaTrackOpusEncoder {
+    pub fn new(channel_frame_cap: usize, params: StreamParams) -> Result<(Self, MediaTrack)> {
+        let (sender, receiver) = broadcast::channel(channel_frame_cap);
+        let channels = match params.channel_count {
+            1 => OpusChannels::Mono,
+            2 => OpusChannels::Stereo,
+            _ => bail!("unsupported channel count"),
+        };
+        let track = MediaTrack::new(receiver, Codec::Opus { channels }, TrackKind::Audio);
+        let encoder = MediaTrackOpusEncoder {
+            sender,
+            encoder: OpusEncoder::new(params),
+        };
+        Ok((encoder, track))
+    }
+}
+
+impl AudioSink for MediaTrackOpusEncoder {
+    fn tick(&mut self, buf: &[f32]) -> Result<ControlFlow<(), ()>> {
+        for (payload, sample_count) in self.encoder.push_slice(buf) {
+            let payload_len = payload.len();
+            let frame = MediaFrame {
+                payload,
+                sample_count: Some(sample_count),
+                skipped_frames: None,
+                skipped_samples: None,
+            };
+            match self.sender.send(frame) {
+                Err(_) => {
+                    tracing::info!("closing encoder loop: track receiver closed.");
+                    return Ok(ControlFlow::Break(()));
+                }
+                Ok(_) => {
+                    trace!("sent opus {sample_count}S {payload_len}B")
+                }
+            }
+        }
+        Ok(ControlFlow::Continue(()))
     }
 }
 
@@ -246,7 +305,7 @@ pub struct OpusEncoder {
 
 impl OpusEncoder {
     pub fn new(params: StreamParams) -> Self {
-        let samples_per_frame = params.buffer_size(DURATION_20MS);
+        let samples_per_frame = params.frame_buffer_size(DURATION_20MS);
         tracing::info!("recorder: opus params {params:?}");
         tracing::info!("recorder: opus samples per frame {samples_per_frame}");
         let encoder = opus::Encoder::new(
@@ -266,16 +325,28 @@ impl OpusEncoder {
         }
     }
 
-    pub fn push_from_consumer<'a>(
+    pub fn pop_from_consumer<'a>(
         &'a mut self,
         consumer: &'a mut Consumer<f32>,
     ) -> impl Iterator<Item = (Bytes, u32)> + 'a {
         std::iter::from_fn(|| {
-            if consumer.is_empty() {
-                return None;
-            }
             for sample in consumer.pop_iter() {
                 if let Some((payload, sample_count)) = self.push_sample(sample) {
+                    return Some((payload, sample_count));
+                }
+            }
+            None
+        })
+    }
+
+    pub fn push_slice<'a>(
+        &'a mut self,
+        samples: &'a [f32],
+    ) -> impl Iterator<Item = (Bytes, u32)> + 'a {
+        let mut iter = samples.into_iter();
+        std::iter::from_fn(move || {
+            while let Some(sample) = iter.next() {
+                if let Some((payload, sample_count)) = self.push_sample(*sample) {
                     return Some((payload, sample_count));
                 }
             }

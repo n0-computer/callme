@@ -1,20 +1,29 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
 
 use anyhow::Result;
 use n0_future::task::AbortOnDropHandle;
+use ringbuf_pipe::ringbuf_pipe;
 use tokio::sync::broadcast;
 use tracing::trace;
 
 use crate::{
-    audio::{AudioConfig, AudioPlayer, AudioRecorder, OutboundAudio, WebrtcAudioProcessor},
+    audio::{
+        AudioConfig, AudioPlayer, AudioRecorder, OutboundAudio, WebrtcAudioProcessor,
+        DURATION_20MS, OPUS_STREAM_PARAMS,
+    },
     rtc::{Codec, MediaFrame, MediaTrack, OpusChannels, TrackKind},
 };
 
+pub use crate::audio::play::AudioSource;
+pub use crate::audio::record::AudioSink;
+
 #[derive(Debug, Clone)]
 pub struct AudioContext {
-    capture_sender: broadcast::Sender<MediaFrame>,
-    config: Arc<AudioConfig>,
     player: AudioPlayer,
+    recorder: AudioRecorder, // config: Arc<AudioConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -28,96 +37,69 @@ impl AudioContext {
         let processor = WebrtcAudioProcessor::new(1, 1, None, config.processing_enabled)?;
         let recorder =
             AudioRecorder::build(&host, config.input_device.as_deref(), processor.clone()).await?;
-        let (capture_sender, _capture_receiver) = broadcast::channel(8);
-        tokio::task::spawn({
-            let capture_sender = capture_sender.clone();
-            async move {
-                while let Ok(frame) = recorder.recv().await {
-                    let OutboundAudio::Opus {
-                        payload,
-                        sample_count,
-                    } = frame;
-                    trace!(
-                        "capture sender: sent frame {sample_count} len {}",
-                        payload.len()
-                    );
-                    let frame = MediaFrame {
-                        payload,
-                        sample_count: Some(sample_count),
-                        skipped_frames: None,
-                        skipped_samples: None,
-                    };
-                    if let Err(_err) = capture_sender.send(frame) {
-                        trace!("capture sent to black hole: no receivers")
-                    }
-                }
-
-                anyhow::Ok(())
-            }
-        });
         let player =
             AudioPlayer::build(&host, config.output_device.as_deref(), processor.clone()).await?;
-        Ok(Self {
-            config: Arc::new(config),
-            capture_sender, // capture_context: Default::default(),
-            player,
-        })
-    }
-    pub fn get_track_from_capture(&self) -> Result<MediaTrack> {
-        let receiver = self.capture_sender.subscribe();
-        let codec = Codec::Opus {
-            channels: OpusChannels::Mono,
-        };
-        let track = MediaTrack::new(receiver, codec, TrackKind::Audio);
-        Ok(track)
+        Ok(Self { player, recorder })
     }
 
-    pub async fn add_track_to_playback(&self, track: MediaTrack) -> Result<()> {
+    pub async fn capture_track(&self) -> Result<MediaTrack> {
+        self.recorder.create_opus_track().await
+    }
+
+    pub async fn play_track(&self, track: MediaTrack) -> Result<()> {
         self.player.add_track(track).await?;
         Ok(())
     }
 
     pub async fn feedback_encoded(&self) -> Result<()> {
-        let track = self.get_track_from_capture()?;
-        self.add_track_to_playback(track).await?;
+        let track = self.capture_track().await?;
+        self.play_track(track).await?;
         Ok(())
     }
 
-    pub fn feedback_raw(&self) -> Result<()> {
-        unimplemented!()
-    }
-    pub fn feedback_processed(&self) -> Result<()> {
-        unimplemented!()
+    pub async fn feedback_raw(&self) -> Result<()> {
+        let buffer_size = OPUS_STREAM_PARAMS.frame_buffer_size(DURATION_20MS * 4);
+        let (sink, source) = ringbuf_pipe(buffer_size);
+        self.recorder.add_sink(sink).await?;
+        self.player.add_source(source).await?;
+        Ok(())
     }
 }
-// }
 
-// #[derive(Debug, Clone)]
-// struct CaptureContext {
-//     task: Arc<AbortOnDropHandle<Result<()>>>,
-// }
+mod ringbuf_pipe {
+    use std::ops::ControlFlow;
 
-// impl CaptureContext {
-//     fn new() -> Result<Self> {
-//         todo!()
-//     }
-//     fn subscribe(&self) -> MediaTrack {}
-// }
+    use super::{AudioSink, AudioSource};
+    use anyhow::Result;
+    use ringbuf::traits::{Consumer as _, Observer, Producer as _, Split};
+    use ringbuf::{HeapCons as Consumer, HeapProd as Producer};
+    use tracing::warn;
 
-//     let mut guard = self.capture_context.lock().unwrap();
-//     let ctx = match guard.as_mut() {
-//         None => {
-//             let ctx = CaptureContext::new()?;
-//             *guard = Some(ctx);
-//             guard.as_mut().unwrap()
-//         }
-//         Some(ctx) => ctx,
-//     };
-//     Ok(ctx.subscribe())
-// }
+    pub struct RingbufSink(Producer<f32>);
+    pub struct RingbufSource(Consumer<f32>);
 
-// pub fn playback(&self, track: MediaTrack) -> Result<()> {
-//     todo!()
-// }
+    pub fn ringbuf_pipe(buffer_size: usize) -> (RingbufSink, RingbufSource) {
+        let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
+        (RingbufSink(producer), RingbufSource(consumer))
+    }
 
-// fn capture_subscribe(&self) -> broadcast::Receiver<MediaFrame> {}
+    impl AudioSink for RingbufSink {
+        fn tick(&mut self, buf: &[f32]) -> Result<ControlFlow<(), ()>> {
+            let len = self.0.push_slice(&buf);
+            if len < buf.len() {
+                warn!("ringbuf sink xrun: failed to send {}", buf.len() - len);
+            }
+            Ok(ControlFlow::Continue(()))
+        }
+    }
+
+    impl AudioSource for RingbufSource {
+        fn tick(&mut self, buf: &mut [f32]) -> Result<ControlFlow<(), usize>> {
+            let len = self.0.pop_slice(buf);
+            if len < buf.len() {
+                warn!("ringbuf source xrun: failed to recv {}", buf.len() - len);
+            }
+            Ok(ControlFlow::Continue(len))
+        }
+    }
+}
