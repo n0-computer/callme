@@ -35,8 +35,8 @@ mod track;
 pub struct RtcConnection {
     conn: Connection,
     session: Session,
-    next_recv_flow_id: NextId,
-    next_send_flow_id: NextId,
+    next_recv_flow_id: Arc<AtomicU32>,
+    next_send_flow_id: Arc<AtomicU32>,
 }
 
 impl RtcConnection {
@@ -55,7 +55,7 @@ impl RtcConnection {
     }
 
     pub async fn send_track(&self, track: MediaTrack) -> Result<()> {
-        let flow_id = self.next_send_flow_id.next();
+        let flow_id = self.next_send_flow_id.fetch_add(1, Ordering::SeqCst);
         let send_flow = self.session.new_send_flow(flow_id.into()).await?;
         let sender = RtpMediaTrackSender { send_flow, track };
         task::spawn(async move {
@@ -67,7 +67,7 @@ impl RtcConnection {
     }
 
     pub async fn recv_track(&self) -> Result<MediaTrack> {
-        let flow_id = self.next_recv_flow_id.next();
+        let flow_id = self.next_recv_flow_id.fetch_add(1, Ordering::SeqCst);
         let recv_flow = self.session.new_receive_flow(flow_id.into()).await?;
         let (track_sender, track_receiver) = broadcast::channel(4);
         let (init_tx, init_rx) = oneshot::channel();
@@ -109,14 +109,5 @@ pub async fn handle_connection_with_audio_context(
             }
             TrackKind::Video => unimplemented!(),
         }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct NextId(Arc<AtomicU32>);
-
-impl NextId {
-    fn next(&self) -> u32 {
-        self.0.fetch_add(1, Ordering::SeqCst)
     }
 }
