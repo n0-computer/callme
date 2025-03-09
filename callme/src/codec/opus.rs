@@ -66,7 +66,8 @@ impl MediaTrackOpusDecoder {
 impl AudioSource for MediaTrackOpusDecoder {
     /// Should be called in a 20ms interval with a buf of len 960 * channel_count.
     fn tick(&mut self, buf: &mut [f32]) -> Result<ControlFlow<(), usize>> {
-        while self.audio_buf.len() < buf.len() {
+        // while self.audio_buf.len() < buf.len() {
+        loop {
             let (skipped_frames, payload) = match self.track.try_recv() {
                 Ok(frame) => {
                     let MediaFrame {
@@ -113,6 +114,7 @@ impl AudioSource for MediaTrackOpusDecoder {
                 );
             }
         }
+
         let len = buf.len().min(self.audio_buf.len());
         buf[..len].copy_from_slice(&self.audio_buf[..len]);
         let end = self.audio_buf.len() - len;

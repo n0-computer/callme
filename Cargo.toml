@@ -19,3 +19,4 @@ members = ["callme", "callme-cli", "callme-egui", "callme-web"]
 [patch.crates-io]
 webrtc-audio-processing = { path = "../webrtc-audio-processing" }
 iroh-roq = { path = "../iroh-roq" }
+cpal = { path = "../cpal" }

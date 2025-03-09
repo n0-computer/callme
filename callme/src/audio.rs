@@ -3,13 +3,15 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::Bytes;
 use cpal::{ChannelCount, SampleRate};
-use device::Devices;
 
 use self::{
     device::list_devices, playback::AudioPlayer, record::AudioRecorder, ringbuf_pipe::ringbuf_pipe,
 };
 pub use self::{
-    device::AudioConfig, playback::AudioSource, processor::WebrtcAudioProcessor, record::AudioSink,
+    device::{AudioConfig, Devices, Direction},
+    playback::AudioSource,
+    processor::WebrtcAudioProcessor,
+    record::AudioSink,
 };
 use crate::rtc::MediaTrack;
 
@@ -33,6 +35,10 @@ pub struct AudioContext {
 impl AudioContext {
     pub async fn list_devices() -> Result<Devices> {
         tokio::task::spawn_blocking(|| list_devices()).await?
+    }
+
+    pub fn list_devices_sync() -> Result<Devices> {
+        list_devices()
     }
 
     pub async fn new(config: AudioConfig) -> Result<Self> {
@@ -131,6 +137,12 @@ impl StreamParams {
             sample_rate,
             channel_count,
         }
+    }
+
+    pub fn duration_from_buffer_size(&self, buffer_size: usize) -> Duration {
+        Duration::from_secs_f32(
+            (buffer_size as f32 / self.channel_count as f32) / self.sample_rate.0 as f32,
+        )
     }
 
     pub const fn frame_duration_in_samples(&self, duration: Duration) -> usize {

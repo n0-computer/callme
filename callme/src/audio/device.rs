@@ -50,7 +50,7 @@ pub fn list_devices() -> Result<Devices> {
     Ok(Devices { input, output })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Devices {
     pub input: Vec<String>,
     pub output: Vec<String>,

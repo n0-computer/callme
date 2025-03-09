@@ -9,11 +9,11 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     use eframe::{NativeOptions, Renderer};
     use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 
-    std::env::set_var("RUST_BACKTRACE", "full");
-    std::env::set_var("RUST_LOG", "debug");
+    std::env::set_var("RUST_BACKTRACE", "1");
+    std::env::set_var("RUST_LOG", "warn,callme=debug");
 
     let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new("warn,callme=trace"))
+        .with_env_filter(EnvFilter::new("warn,callme=debug"))
         .pretty()
         .finish();
     let subscriber = {

@@ -22,7 +22,7 @@ use ringbuf::{
     HeapCons as Consumer, HeapProd as Producer,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{debug, error, info, span, trace, warn, Level};
+use tracing::{debug, error, info, span, trace, trace_span, warn, Level};
 
 use super::{
     device::{find_device, input_stream_config, Direction, StreamInfo},
@@ -151,9 +151,14 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
     let processor_frame_size = state.params.frame_buffer_size(DURATION_10MS);
     let mut input_buf: Vec<f32> = Vec::with_capacity(processor_frame_size);
     let mut resampled_buf: Vec<f32> = Vec::with_capacity(processor_frame_size);
+    let span = trace_span!("capture-cb");
     device.build_input_stream::<S, _, _>(
         config,
         move |data: &[S], info: &_| {
+            let _guard = span.enter();
+            let start = Instant::now();
+            let max_tick_time = state.params.duration_from_buffer_size(data.len());
+
             if tick < 5 {
                 info!("record stream started. len={}", data.len());
             }
@@ -185,15 +190,18 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
                 .set_capture_delay(capture_delay + resampler_delay);
             // process
             let mut chunks = resampled_buf.chunks_exact_mut(processor_frame_size);
+            let mut pushed = 0;
             for chunk in &mut chunks {
                 state.processor.process_capture_frame(chunk).unwrap();
                 let n = state.producer.push_slice(&chunk);
+                pushed += n;
                 if n < chunk.len() {
                     warn!(
                         "record xrun: failed to push out {} of {}",
                         chunk.len() - n,
                         chunk.len()
                     );
+                    break;
                 }
             }
             // cleanup
@@ -202,6 +210,14 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
             resampled_buf.copy_within(end.., 0);
             resampled_buf.truncate(remainder_len);
 
+            let elapsed = start.elapsed();
+            trace!(
+                "tick {tick}: had {:?} took {:?} / get {} push {}",
+                max_tick_time,
+                elapsed,
+                data.len(),
+                pushed
+            );
             tick += 1;
         },
         |err| {
@@ -224,6 +240,15 @@ fn capture_loop(
     let frame_size = params.frame_buffer_size(tick_duration);
     let mut buf = vec![0.; frame_size];
     let mut sinks = vec![];
+
+    if let Err(err) = audio_thread_priority::promote_current_thread_to_real_time(
+        frame_size as u32,
+        params.sample_rate.0,
+    ) {
+        warn!("failed to set capture thread to realtime priority: {err:?}");
+    }
+
+    let mut tick = 0;
     loop {
         let start = Instant::now();
 
@@ -231,7 +256,7 @@ fn capture_loop(
         loop {
             match sink_receiver.try_recv() {
                 Ok(sink) => {
-                    info!("add new track to decoder");
+                    info!("new sink added to capture loop");
                     sinks.push(sink);
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
@@ -254,8 +279,16 @@ fn capture_loop(
                 false
             }
         });
-        let sleep_time = tick_duration.saturating_sub(start.elapsed());
-        trace!("sleep {sleep_time:?}");
-        std::thread::sleep(sleep_time);
+        trace!("tick {tick} took {:?} pulled {count}", start.elapsed());
+        if start.elapsed() > tick_duration {
+            warn!(
+                "capture thread tick exceeded interval (took {:?})",
+                start.elapsed()
+            );
+        } else {
+            let sleep_time = tick_duration.saturating_sub(start.elapsed());
+            spin_sleep::sleep(sleep_time);
+        }
+        tick += 1;
     }
 }

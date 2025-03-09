@@ -145,9 +145,9 @@ async fn record_wav(file_path: PathBuf, mut track: MediaTrack) -> Result<()> {
 }
 
 fn stream_wav(file_path: PathBuf, sender: broadcast::Sender<MediaFrame>) -> Result<()> {
-    let file = std::fs::File::open(&file_path)?;
-    let mut encoder = OpusEncoder::new(OPUS_STREAM_PARAMS);
     'outer: loop {
+        let file = std::fs::File::open(&file_path)?;
+        let mut encoder = OpusEncoder::new(OPUS_STREAM_PARAMS);
         let mut reader = WavReader::new(&file)?;
         info!("wav info: {:?}", reader.spec());
         let start = Instant::now();

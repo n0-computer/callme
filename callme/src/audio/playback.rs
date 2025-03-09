@@ -16,7 +16,7 @@ use ringbuf::{
     HeapCons as Consumer, HeapProd as Producer,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{debug, error, info, trace, warn, Level};
+use tracing::{debug, error, info, trace, trace_span, warn, Level};
 
 use super::{
     device::{find_device, output_stream_config, Direction, StreamInfo},
@@ -47,7 +47,7 @@ impl AudioPlayer {
         let stream_info = output_stream_config(&device, &OPUS_STREAM_PARAMS)?;
 
         let params = StreamParams::new(stream_info.config.sample_rate, stream_info.config.channels);
-        let buffer_size = params.frame_buffer_size(DURATION_20MS) * 4;
+        let buffer_size = params.frame_buffer_size(DURATION_20MS) * 16;
         let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
 
         let (source_sender, track_receiver) = mpsc::channel(16);
@@ -100,31 +100,40 @@ fn playback_loop(
     let frame_size = params.frame_buffer_size(tick_duration);
     let mut work_buf = vec![0.; frame_size];
     let mut out_buf = vec![0.; frame_size];
-    let mut sources = vec![];
+    let mut sources: Vec<Box<dyn AudioSource>> = vec![];
 
+    if let Err(err) = audio_thread_priority::promote_current_thread_to_real_time(
+        frame_size as u32,
+        params.sample_rate.0,
+    ) {
+        warn!("failed to set playback thread to realtime priority: {err:?}");
+    }
+
+    // todo: do we want this?
+    let initial_latency = params.frame_buffer_size(DURATION_20MS * 4);
+    let initial_silence = vec![0.; initial_latency];
+    let n = producer.push_slice(&initial_silence);
+    debug_assert_eq!(n, initial_silence.len());
+
+    let mut tick = 0;
     loop {
         let start = Instant::now();
 
-        // pull incoming sources
-        loop {
-            match source_receiver.try_recv() {
-                Ok(source) => {
-                    info!("add new track to decoder");
-                    sources.push(source);
-                }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    info!("stop playback mixer loop: channel closed");
-                    return;
-                }
-            }
-        }
-
+        // let available = producer.vacant_len();
+        // work_buf.resize(available, 0.);
+        // out_buf.resize(available, 0.);
         out_buf.fill(0.);
         sources.retain_mut(|source| match source.tick(&mut work_buf) {
             Ok(ControlFlow::Continue(count)) => {
                 for i in 0..count {
                     out_buf[i] += work_buf[i];
+                }
+                if count < work_buf.len() {
+                    warn!(
+                        "audio source xrun: missing {} of {}",
+                        work_buf.len() - count,
+                        work_buf.len()
+                    );
                 }
                 true
             }
@@ -147,9 +156,32 @@ fn playback_loop(
             );
         }
 
-        let sleep_time = tick_duration.saturating_sub(start.elapsed());
-        trace!("sleep {sleep_time:?}");
-        std::thread::sleep(sleep_time);
+        // pull incoming sources
+        loop {
+            match source_receiver.try_recv() {
+                Ok(source) => {
+                    info!("add new track to decoder");
+                    sources.push(source);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    info!("stop playback mixer loop: channel closed");
+                    return;
+                }
+            }
+        }
+
+        trace!("tick {tick} took {:?} pushed {len}", start.elapsed());
+        if start.elapsed() > tick_duration {
+            warn!(
+                "playback thread tick exceeded interval (took {:?})",
+                start.elapsed()
+            );
+        } else {
+            let sleep_time = tick_duration.saturating_sub(start.elapsed());
+            spin_sleep::sleep(sleep_time);
+        }
+        tick += 1;
     }
 }
 
@@ -208,11 +240,11 @@ fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Def
     let mut tick = 0;
     let mut last_warning = Instant::now();
     let mut underflows = 0;
+    let span = trace_span!("playback-cb");
 
     device.build_output_stream::<S, _, _>(
         config,
         move |data: &mut [S], info: &_| {
-            let span = tracing::span!(Level::TRACE, "output-callback");
             let _guard = span.enter();
             if tick < 2 {
                 debug!("[{tick}] stream started. len={} inc={}", data.len(), state.consumer.occupied_len());

@@ -69,7 +69,7 @@ impl RtcConnection {
     pub async fn recv_track(&self) -> Result<MediaTrack> {
         let flow_id = self.next_recv_flow_id.fetch_add(1, Ordering::SeqCst);
         let recv_flow = self.session.new_receive_flow(flow_id.into()).await?;
-        let (track_sender, track_receiver) = broadcast::channel(4);
+        let (track_sender, track_receiver) = broadcast::channel(12);
         let (init_tx, init_rx) = oneshot::channel();
         let receiver = RtpMediaTrackReceiver {
             recv_flow,
