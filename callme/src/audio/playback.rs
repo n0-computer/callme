@@ -129,7 +129,7 @@ fn playback_loop(
                     out_buf[i] += work_buf[i];
                 }
                 if count < work_buf.len() {
-                    warn!(
+                    debug!(
                         "audio source xrun: missing {} of {}",
                         work_buf.len() - count,
                         work_buf.len()

@@ -3,13 +3,20 @@ use std::str::FromStr;
 use async_channel::{Receiver, Sender};
 use callme::{audio::AudioConfig, run::NetEvent};
 use eframe::NativeOptions;
-use egui::{vec2, OutputCommand};
+use egui::{vec2, OutputCommand, Ui, WidgetText};
+use egui_dock::{DockArea, DockState, Style, TabViewer};
 use iroh::NodeId;
 use n0_future::StreamExt;
+use strum::VariantArray;
 
 const DEFAULT: &str = "<default>";
 
 pub struct App {
+    dock_state: DockState<Tab>,
+    state: AppState,
+}
+
+struct AppState {
     remote_node_id: String,
     worker: WorkerHandle,
     log: Vec<String>,
@@ -21,6 +28,100 @@ pub struct App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.state.update();
+        ctx.set_pixels_per_point(4.0);
+        ctx.style_mut(|s| s.spacing.button_padding = vec2(8.0, 8.0));
+
+        egui::TopBottomPanel::top("my_panel")
+            .min_height(40.)
+            .show(ctx, |_ui| {});
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // self.ui_section_call(ui);
+
+            // self.ui_section_config(ui);
+
+            // self.ui_section_log(ui);
+            DockArea::new(&mut self.dock_state)
+                .style(Style::from_egui(ui.style().as_ref()))
+                .show_close_buttons(false)
+                .show_leaf_close_all_buttons(false)
+                .show_leaf_collapse_buttons(false)
+                .show_inside(
+                    ui,
+                    &mut MyTabViewer {
+                        state: &mut self.state,
+                    },
+                );
+        });
+    }
+}
+
+// First, let's pick a type that we'll use to attach some data to each tab.
+// It can be any type.
+#[derive(Debug, Copy, Clone, strum::AsRefStr, strum::VariantArray, strum::Display)]
+enum Tab {
+    Call,
+    Config,
+    Log,
+}
+
+// To define the contents and properties of individual tabs, we implement the `TabViewer`
+// trait. Only three things are mandatory: the `Tab` associated type, and the `ui` and
+// `title` methods. There are more methods in `TabViewer` which you can also override.
+struct MyTabViewer<'a> {
+    state: &'a mut AppState,
+}
+
+impl<'a> TabViewer for MyTabViewer<'a> {
+    // This associated type is used to attach some data to each tab.
+    type Tab = Tab;
+
+    // Returns the current `tab`'s title.
+    fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
+        tab.as_ref().into()
+    }
+
+    // Defines the contents of a given `tab`.
+    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+        match tab {
+            Tab::Call => self.state.ui_section_call(ui),
+            Tab::Config => self.state.ui_section_config(ui),
+            Tab::Log => self.state.ui_section_log(ui),
+        }
+    }
+
+    fn closeable(&mut self, _tab: &mut Self::Tab) -> bool {
+        false
+    }
+}
+
+impl App {
+    pub fn run(options: NativeOptions) -> Result<(), eframe::Error> {
+        let handle = Worker::spawn();
+        let devices =
+            callme::audio::AudioContext::list_devices_sync().expect("failed to list audio devices");
+        let state = AppState {
+            remote_node_id: Default::default(),
+            worker: handle,
+            log: Default::default(),
+            our_node_id: None,
+            devices,
+            selected_input: DEFAULT.to_string(),
+            selected_output: DEFAULT.to_string(),
+        };
+
+        let tabs = Tab::VARIANTS.to_vec();
+        let dock_state = DockState::new(tabs);
+        let app = App { state, dock_state };
+        eframe::run_native(
+            "egui-android-demo",
+            options,
+            Box::new(|_cc| Ok(Box::new(app))),
+        )
+    }
+}
+impl AppState {
+    fn update(&mut self) {
         if let Ok(event) = self.worker.event_rx.try_recv() {
             match event {
                 Event::Log(line) => self.log.push(line),
@@ -30,145 +131,7 @@ impl eframe::App for App {
                 Event::Net(event) => self.log.push(format!("{event:?}")),
             }
         }
-        ctx.set_pixels_per_point(4.0);
-        ctx.style_mut(|s| s.spacing.button_padding = vec2(8.0, 8.0));
-
-        egui::TopBottomPanel::top("my_panel")
-            .min_height(40.)
-            .show(ctx, |_ui| {});
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // ui.vertical(|ui| {
-            ui.heading("Call a remote node");
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    let name_label = ui.label("Node id: ");
-                    ui.text_edit_singleline(&mut self.remote_node_id)
-                        .labelled_by(name_label.id);
-                });
-                #[cfg(target_os = "android")]
-                {
-                    if ui
-                        .button("📋 Paste")
-                        .on_hover_text("Click to paste")
-                        .clicked()
-                    {
-                        self.remote_node_id = android_clipboard::get_text()
-                            .expect("failed to get text from clipboard");
-                    }
-                }
-            });
-            if ui.button("Call").clicked() {
-                self.worker
-                    .command_tx
-                    .send_blocking(Command::Call {
-                        node_id: self.remote_node_id.clone(),
-                        audio_config: self.audio_config(),
-                    })
-                    .unwrap();
-            }
-
-            ui.heading("Accept a call");
-            if let Some(node_id) = &self.our_node_id {
-                ui.horizontal(|ui| {
-                    if ui.button("Accept calls").clicked() {
-                        self.worker
-                            .command_tx
-                            .send_blocking(Command::Accept {
-                                audio_config: self.audio_config(),
-                            })
-                            .unwrap();
-                    }
-                    if ui
-                        .button("📋 Copy node id")
-                        .on_hover_text("Click to copy")
-                        .clicked()
-                    {
-                        ui.output_mut(|writer| {
-                            writer
-                                .commands
-                                .push(OutputCommand::CopyText(node_id.to_string()));
-                        });
-                        #[cfg(target_os = "android")]
-                        if let Err(err) = android_clipboard::set_text(node_id.to_string()) {
-                            tracing::warn!("failed to copy text to clipboard: {err}");
-                        }
-                    }
-                });
-            }
-
-            ui.heading("Audio config");
-            ui.vertical(|ui| {
-                egui::ComboBox::from_label("Capture device")
-                    .selected_text(format!("{:?}", self.selected_input))
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(self.selected_input == DEFAULT, DEFAULT)
-                            .clicked()
-                        {
-                            self.selected_input = DEFAULT.to_string();
-                        }
-                        for device in &self.devices.input {
-                            if ui
-                                .selectable_label(&self.selected_input == device, device)
-                                .clicked()
-                            {
-                                self.selected_input = device.to_string()
-                            }
-                        }
-                    });
-
-                egui::ComboBox::from_label("Playback device")
-                    .selected_text(format!("{:?}", self.selected_output))
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(self.selected_output == DEFAULT, DEFAULT)
-                            .clicked()
-                        {
-                            self.selected_output = DEFAULT.to_string();
-                        }
-                        for device in &self.devices.output {
-                            if ui
-                                .selectable_label(&self.selected_output == device, device)
-                                .clicked()
-                            {
-                                self.selected_output = device.to_string()
-                            }
-                        }
-                    });
-            });
-
-            ui.heading("Log");
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for line in &self.log {
-                    ui.label(line);
-                }
-            });
-            // });
-        });
     }
-}
-
-impl App {
-    pub fn run(options: NativeOptions) -> Result<(), eframe::Error> {
-        let handle = Worker::spawn();
-        let devices =
-            callme::audio::AudioContext::list_devices_sync().expect("failed to list audio devices");
-        let app = App {
-            remote_node_id: Default::default(),
-            worker: handle,
-            log: Default::default(),
-            our_node_id: None,
-            devices,
-            selected_input: DEFAULT.to_string(),
-            selected_output: DEFAULT.to_string(),
-        };
-        eframe::run_native(
-            "egui-android-demo",
-            options,
-            Box::new(|_cc| Ok(Box::new(app))),
-        )
-    }
-
     fn audio_config(&self) -> AudioConfig {
         let input_device = if self.selected_input == DEFAULT {
             None
@@ -185,6 +148,118 @@ impl App {
             output_device,
             processing_enabled: true,
         }
+    }
+
+    fn ui_section_call(&mut self, ui: &mut Ui) {
+        ui.heading("Call a remote node");
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                let name_label = ui.label("Node id: ");
+                ui.text_edit_singleline(&mut self.remote_node_id)
+                    .labelled_by(name_label.id);
+                #[cfg(target_os = "android")]
+                if ui
+                    .button("📋 Paste")
+                    .on_hover_text("Click to paste")
+                    .clicked()
+                {
+                    self.remote_node_id =
+                        android_clipboard::get_text().expect("failed to get text from clipboard");
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Call").clicked() {
+                self.worker
+                    .command_tx
+                    .send_blocking(Command::Call {
+                        node_id: self.remote_node_id.clone(),
+                        audio_config: self.audio_config(),
+                    })
+                    .unwrap();
+            }
+        });
+
+        ui.heading("Accept a call");
+        if let Some(node_id) = &self.our_node_id {
+            ui.horizontal(|ui| {
+                if ui.button("Accept calls").clicked() {
+                    self.worker
+                        .command_tx
+                        .send_blocking(Command::Accept {
+                            audio_config: self.audio_config(),
+                        })
+                        .unwrap();
+                }
+                if ui
+                    .button("📋 Copy node id")
+                    .on_hover_text("Click to copy")
+                    .clicked()
+                {
+                    ui.output_mut(|writer| {
+                        writer
+                            .commands
+                            .push(OutputCommand::CopyText(node_id.to_string()));
+                    });
+                    #[cfg(target_os = "android")]
+                    if let Err(err) = android_clipboard::set_text(node_id.to_string()) {
+                        tracing::warn!("failed to copy text to clipboard: {err}");
+                    }
+                }
+            });
+        }
+    }
+
+    fn ui_section_config(&mut self, ui: &mut Ui) {
+        ui.heading("Audio config");
+        ui.vertical(|ui| {
+            egui::ComboBox::from_label("Capture device")
+                .selected_text(&self.selected_input)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(self.selected_input == DEFAULT, DEFAULT)
+                        .clicked()
+                    {
+                        self.selected_input = DEFAULT.to_string();
+                    }
+                    for device in &self.devices.input {
+                        if ui
+                            .selectable_label(&self.selected_input == device, device)
+                            .clicked()
+                        {
+                            self.selected_input = device.to_string()
+                        }
+                    }
+                });
+
+            egui::ComboBox::from_label("Playback device")
+                .selected_text(&self.selected_output)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(self.selected_output == DEFAULT, DEFAULT)
+                        .clicked()
+                    {
+                        self.selected_output = DEFAULT.to_string();
+                    }
+                    for device in &self.devices.output {
+                        if ui
+                            .selectable_label(&self.selected_output == device, device)
+                            .clicked()
+                        {
+                            self.selected_output = device.to_string()
+                        }
+                    }
+                });
+        });
+    }
+
+    fn ui_section_log(&mut self, ui: &mut Ui) {
+        ui.heading("Log");
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for line in &self.log {
+                ui.label(line);
+            }
+        });
     }
 }
 

@@ -20,3 +20,6 @@ members = ["callme", "callme-cli", "callme-egui", "callme-web"]
 webrtc-audio-processing = { path = "../webrtc-audio-processing" }
 iroh-roq = { path = "../iroh-roq" }
 cpal = { path = "../cpal" }
+# bumps egui dep to 0.31
+# remove once https://github.com/grievouz/egui_tracing/pull/37 is merged
+egui_tracing = { git = "https://github.com/maxjoehnk/egui_tracing.git", branch = "feature/egui-0.31" }

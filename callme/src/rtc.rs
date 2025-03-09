@@ -78,6 +78,7 @@ impl RtcConnection {
         };
         task::spawn(async move {
             receiver.run().await;
+            info!("rtp receiver closed");
         });
         let codec = init_rx.await??;
         let track = MediaTrack {

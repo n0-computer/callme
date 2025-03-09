@@ -1,9 +1,14 @@
 use anyhow::Context;
 use callme::{
     audio::{AudioConfig, AudioContext},
-    net, run, NodeId,
+    net,
+    rtc::{handle_connection_with_audio_context, RtcProtocol},
+    run, NodeId,
 };
 use clap::Parser;
+use dialoguer::Confirm;
+use iroh::protocol::Router;
+use tracing::{error, info};
 
 #[derive(Parser, Debug)]
 #[command(about = "Call me iroh", long_about = None)]
@@ -22,8 +27,10 @@ struct Args {
 
 #[derive(Debug, Parser)]
 enum Command {
-    /// Accept a call from a remote node.
+    /// Accept a single call from a remote node.
     Accept,
+    /// Accept calls from remote nodes.
+    AcceptMany,
     /// Make a call to a remote node.
     Connect { node_id: NodeId },
     /// Make a call to many remote nodes.
@@ -69,6 +76,42 @@ async fn main() -> anyhow::Result<()> {
                 run::accept(&endpoint, audio_config, None)
                     .await
                     .context("accept failed")?;
+            }
+            Command::AcceptMany => {
+                let endpoint = net::bind_endpoint().await?;
+                let proto = RtcProtocol::new(endpoint.clone());
+                let _router = Router::builder(endpoint.clone())
+                    .accept(RtcProtocol::ALPN, proto.clone())
+                    .spawn()
+                    .await?;
+                endpoint_shutdown = Some(endpoint.clone());
+                println!("our node id:\n{}", endpoint.node_id());
+                let audio_ctx = AudioContext::new(audio_config).await?;
+                while let Some(conn) = proto.accept().await? {
+                    let peer = conn.transport().remote_node_id()?.fmt_short();
+                    if tokio::task::spawn_blocking({
+                        let peer = peer.clone();
+                        move || {
+                            Confirm::new()
+                                .with_prompt(format!("Incoming call from {peer}. Accept?"))
+                                .interact()
+                                .unwrap()
+                        }
+                    })
+                    .await?
+                    {
+                        let audio_ctx = audio_ctx.clone();
+                        tokio::task::spawn(async move {
+                            if let Err(err) =
+                                handle_connection_with_audio_context(audio_ctx.clone(), conn).await
+                            {
+                                error!("connection from {peer} closed with error: {err:?}")
+                            } else {
+                                info!("connection from {peer} closed")
+                            }
+                        });
+                    };
+                }
             }
             Command::Connect { node_id } => {
                 let endpoint = net::bind_endpoint().await?;
