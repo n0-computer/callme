@@ -27,11 +27,11 @@ jobs:
           java-version: "17"
       - uses: android-actions/setup-android@v3
         with:
-          packages: "platforms;android-32"
+          packages: "platforms;android-30"
       - uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: r26b
+          ndk-version: r28b
 
       - uses: taiki-e/cache-cargo-install-action@v2
         with:
