@@ -22,6 +22,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "std"] }
 egui_dock = "0.16.0"
 strum = { version = "0.27.1", features = ["derive"] }
 egui_tracing = "0.2.6"
+arboard = { version = "3.4.1", features = ["wl-clipboard-rs"] }
 
 [target.'cfg(target_os = "android")'.dependencies.android_clipboard]
 version = "0.1.0"

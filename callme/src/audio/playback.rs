@@ -119,9 +119,21 @@ fn playback_loop(
     loop {
         let start = Instant::now();
 
-        // let available = producer.vacant_len();
-        // work_buf.resize(available, 0.);
-        // out_buf.resize(available, 0.);
+        // pull incoming sources
+        loop {
+            match source_receiver.try_recv() {
+                Ok(source) => {
+                    info!("add new track to decoder");
+                    sources.push(source);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    info!("stop playback mixer loop: channel closed");
+                    return;
+                }
+            }
+        }
+
         out_buf.fill(0.);
         sources.retain_mut(|source| match source.tick(&mut work_buf) {
             Ok(ControlFlow::Continue(count)) => {
@@ -154,21 +166,6 @@ fn playback_loop(
                 out_buf.len() - len,
                 out_buf.len()
             );
-        }
-
-        // pull incoming sources
-        loop {
-            match source_receiver.try_recv() {
-                Ok(source) => {
-                    info!("add new track to decoder");
-                    sources.push(source);
-                }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    info!("stop playback mixer loop: channel closed");
-                    return;
-                }
-            }
         }
 
         trace!("tick {tick} took {:?} pushed {len}", start.elapsed());

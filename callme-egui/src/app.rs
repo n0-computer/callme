@@ -1,97 +1,54 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
+use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
-use callme::{audio::AudioConfig, run::NetEvent};
+use callme::{
+    audio::{AudioConfig, AudioContext},
+    rtc::{handle_connection_with_audio_context, RtcConnection, RtcProtocol},
+};
 use eframe::NativeOptions;
-use egui::{vec2, OutputCommand, Ui, WidgetText};
-use egui_dock::{DockArea, DockState, Style, TabViewer};
-use iroh::NodeId;
-use n0_future::StreamExt;
-use strum::VariantArray;
+use egui::{RichText, Ui};
+use iroh::{protocol::Router, Endpoint, NodeId};
+use n0_future::task::AbortOnDropHandle;
+use tracing::warn;
 
 const DEFAULT: &str = "<default>";
 
 pub struct App {
-    dock_state: DockState<Tab>,
     state: AppState,
 }
 
+enum UiSection {
+    Config,
+    Main,
+}
+
 struct AppState {
+    section: UiSection,
     remote_node_id: String,
     worker: WorkerHandle,
-    log: Vec<String>,
-    our_node_id: Option<String>,
+    our_node_id: Option<NodeId>,
     devices: callme::audio::Devices,
     selected_input: String,
     selected_output: String,
+    calls: BTreeMap<NodeId, CallState>,
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.state.update();
         ctx.set_pixels_per_point(4.0);
-        ctx.style_mut(|s| s.spacing.button_padding = vec2(8.0, 8.0));
+        // ctx.style_mut(|s| s.spacing.button_padding = vec2(4.0, 4.0));
 
+        #[cfg(target_os = "android")]
         egui::TopBottomPanel::top("my_panel")
             .min_height(40.)
             .show(ctx, |_ui| {});
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // self.ui_section_call(ui);
 
-            // self.ui_section_config(ui);
-
-            // self.ui_section_log(ui);
-            DockArea::new(&mut self.dock_state)
-                .style(Style::from_egui(ui.style().as_ref()))
-                .show_close_buttons(false)
-                .show_leaf_close_all_buttons(false)
-                .show_leaf_collapse_buttons(false)
-                .show_inside(
-                    ui,
-                    &mut MyTabViewer {
-                        state: &mut self.state,
-                    },
-                );
+        egui::CentralPanel::default().show(ctx, |ui| match self.state.section {
+            UiSection::Config => self.state.ui_section_config(ui),
+            UiSection::Main => self.state.ui_section_call(ui),
         });
-    }
-}
-
-// First, let's pick a type that we'll use to attach some data to each tab.
-// It can be any type.
-#[derive(Debug, Copy, Clone, strum::AsRefStr, strum::VariantArray, strum::Display)]
-enum Tab {
-    Call,
-    Config,
-    Log,
-}
-
-// To define the contents and properties of individual tabs, we implement the `TabViewer`
-// trait. Only three things are mandatory: the `Tab` associated type, and the `ui` and
-// `title` methods. There are more methods in `TabViewer` which you can also override.
-struct MyTabViewer<'a> {
-    state: &'a mut AppState,
-}
-
-impl<'a> TabViewer for MyTabViewer<'a> {
-    // This associated type is used to attach some data to each tab.
-    type Tab = Tab;
-
-    // Returns the current `tab`'s title.
-    fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
-        tab.as_ref().into()
-    }
-
-    // Defines the contents of a given `tab`.
-    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
-        match tab {
-            Tab::Call => self.state.ui_section_call(ui),
-            Tab::Config => self.state.ui_section_config(ui),
-            Tab::Log => self.state.ui_section_log(ui),
-        }
-    }
-
-    fn closeable(&mut self, _tab: &mut Self::Tab) -> bool {
-        false
     }
 }
 
@@ -101,18 +58,17 @@ impl App {
         let devices =
             callme::audio::AudioContext::list_devices_sync().expect("failed to list audio devices");
         let state = AppState {
+            section: UiSection::Config,
             remote_node_id: Default::default(),
             worker: handle,
-            log: Default::default(),
             our_node_id: None,
             devices,
             selected_input: DEFAULT.to_string(),
             selected_output: DEFAULT.to_string(),
+            calls: Default::default(),
         };
 
-        let tabs = Tab::VARIANTS.to_vec();
-        let dock_state = DockState::new(tabs);
-        let app = App { state, dock_state };
+        let app = App { state };
         eframe::run_native(
             "egui-android-demo",
             options,
@@ -124,11 +80,16 @@ impl AppState {
     fn update(&mut self) {
         if let Ok(event) = self.worker.event_rx.try_recv() {
             match event {
-                Event::Log(line) => self.log.push(line),
                 Event::EndpointBound(node_id) => {
-                    self.our_node_id = Some(node_id.to_string());
+                    self.our_node_id = Some(node_id);
                 }
-                Event::Net(event) => self.log.push(format!("{event:?}")),
+                Event::SetCallState(node_id, call_state) => {
+                    if matches!(call_state, CallState::Aborted) {
+                        self.calls.remove(&node_id);
+                    } else {
+                        self.calls.insert(node_id, call_state);
+                    }
+                }
             }
         }
     }
@@ -154,60 +115,97 @@ impl AppState {
         ui.heading("Call a remote node");
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                let name_label = ui.label("Node id: ");
-                ui.text_edit_singleline(&mut self.remote_node_id)
-                    .labelled_by(name_label.id);
-                #[cfg(target_os = "android")]
                 if ui
-                    .button("📋 Paste")
+                    .button("📋 Paste node id")
                     .on_hover_text("Click to paste")
                     .clicked()
                 {
-                    self.remote_node_id =
-                        android_clipboard::get_text().expect("failed to get text from clipboard");
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        self.remote_node_id =
+                            arboard::Clipboard::new().unwrap().get_text().unwrap();
+                    }
+
+                    #[cfg(target_os = "android")]
+                    {
+                        self.remote_node_id = android_clipboard::get_text()
+                            .expect("failed to get text from clipboard");
+                    }
                 }
             });
-        });
-        ui.horizontal(|ui| {
-            if ui.button("Call").clicked() {
-                self.worker
-                    .command_tx
-                    .send_blocking(Command::Call {
-                        node_id: self.remote_node_id.clone(),
-                        audio_config: self.audio_config(),
-                    })
-                    .unwrap();
+            if !self.remote_node_id.is_empty() {
+                ui.horizontal(|ui| {
+                    if ui.button("Call").clicked() {
+                        self.cmd(Command::Call {
+                            node_id: self.remote_node_id.clone(),
+                        });
+                    }
+                    ui.label(fmt_node_id(self.remote_node_id.split_at(10).0));
+                });
             }
         });
 
-        ui.heading("Accept a call");
+        ui.add_space(8.);
+        ui.heading("Accept calls");
         if let Some(node_id) = &self.our_node_id {
             ui.horizontal(|ui| {
-                if ui.button("Accept calls").clicked() {
-                    self.worker
-                        .command_tx
-                        .send_blocking(Command::Accept {
-                            audio_config: self.audio_config(),
-                        })
-                        .unwrap();
-                }
+                ui.label(format!("Our node id:"));
+                ui.label(fmt_node_id(&node_id.fmt_short()));
                 if ui
-                    .button("📋 Copy node id")
+                    .button("📋 Copy")
                     .on_hover_text("Click to copy")
                     .clicked()
                 {
-                    ui.output_mut(|writer| {
-                        writer
-                            .commands
-                            .push(OutputCommand::CopyText(node_id.to_string()));
-                    });
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        if let Err(err) = arboard::Clipboard::new()
+                            .unwrap()
+                            .set_text(node_id.to_string())
+                        {
+                            warn!("failed to copy text to clipboard: {err}");
+                        }
+                    }
                     #[cfg(target_os = "android")]
                     if let Err(err) = android_clipboard::set_text(node_id.to_string()) {
-                        tracing::warn!("failed to copy text to clipboard: {err}");
+                        warn!("failed to copy text to clipboard: {err}");
                     }
                 }
             });
         }
+
+        ui.add_space(8.);
+        ui.heading("Active calls");
+        ui.vertical(|ui| {
+            for (node_id, state) in &self.calls {
+                let node_id = *node_id;
+                ui.horizontal(|ui| {
+                    ui.label(fmt_node_id(&node_id.fmt_short()));
+                    ui.label(format!("{}", state));
+                    if matches!(state, CallState::Incoming) {
+                        if ui.button("Accept").clicked() {
+                            self.cmd(Command::HandleIncoming {
+                                node_id,
+                                accept: true,
+                            });
+                        }
+                        if ui.button("Decline").clicked() {
+                            self.cmd(Command::HandleIncoming {
+                                node_id,
+                                accept: false,
+                            });
+                        }
+                    } else {
+                        if ui.button("Drop").clicked() {
+                            self.cmd(Command::Abort { node_id });
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    fn cmd(&self, command: Command) {
+        self.worker.command_tx.send_blocking(command).unwrap();
     }
 
     fn ui_section_config(&mut self, ui: &mut Ui) {
@@ -250,38 +248,57 @@ impl AppState {
                         }
                     }
                 });
-        });
-    }
 
-    fn ui_section_log(&mut self, ui: &mut Ui) {
-        ui.heading("Log");
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for line in &self.log {
-                ui.label(line);
+            if ui.button("Save & start").clicked() {
+                let audio_config = self.audio_config();
+                self.cmd(Command::SetAudioConfig { audio_config });
+                self.section = UiSection::Main;
             }
         });
     }
 }
 
+fn fmt_node_id(text: &str) -> RichText {
+    let text = format!("{text}…");
+    egui::RichText::new(text)
+        .underline()
+        .family(egui::FontFamily::Monospace)
+}
+
 enum Event {
     EndpointBound(NodeId),
-    Net(NetEvent),
-    Log(String),
+    SetCallState(NodeId, CallState),
+}
+
+#[derive(strum::Display)]
+enum CallState {
+    Incoming,
+    Pending,
+    Active,
+    Aborted,
+}
+
+enum CallInfo {
+    Calling,
+    Incoming(RtcConnection),
+    Active(RtcConnection, AbortOnDropHandle<Result<()>>),
 }
 
 enum Command {
-    Call {
-        node_id: String,
-        audio_config: AudioConfig,
-    },
-    Accept {
-        audio_config: AudioConfig,
-    },
+    SetAudioConfig { audio_config: AudioConfig },
+    Call { node_id: String },
+    HandleIncoming { node_id: NodeId, accept: bool },
+    Abort { node_id: NodeId },
 }
 
 struct Worker {
     command_rx: Receiver<Command>,
     event_tx: Sender<Event>,
+    active_calls: BTreeMap<NodeId, CallInfo>,
+    endpoint: Endpoint,
+    handler: RtcProtocol,
+    _router: Router,
+    audio_context: Option<AudioContext>,
 }
 
 struct WorkerHandle {
@@ -293,10 +310,6 @@ impl Worker {
     pub fn spawn() -> WorkerHandle {
         let (command_tx, command_rx) = async_channel::bounded(16);
         let (event_tx, event_rx) = async_channel::bounded(16);
-        let mut worker = Worker {
-            event_tx,
-            command_rx,
-        };
         let handle = WorkerHandle {
             event_rx,
             command_tx,
@@ -307,75 +320,139 @@ impl Worker {
                 .build()
                 .expect("failed to start tokio runtime");
             rt.block_on(async move {
+                let mut worker = Worker::start(event_tx, command_rx)
+                    .await
+                    .expect("worker failed to start");
                 worker.run().await.expect("worker died");
             });
         });
         handle
     }
 
-    async fn run(&mut self) -> anyhow::Result<()> {
-        let ep = callme::net::bind_endpoint().await?;
-        self.event_tx
-            .send(Event::EndpointBound(ep.node_id()))
-            .await?;
-        self.log(format!("our node id: {}", ep.node_id().fmt_short()))
-            .await;
-        let (accept_event_tx, accept_event_rx) = async_channel::bounded(16);
-        let (connect_event_tx, connect_event_rx) = async_channel::bounded(16);
-
-        let event_task = n0_future::task::spawn({
-            let event_tx = self.event_tx.clone();
-            async move {
-                let events = n0_future::stream::race(accept_event_rx, connect_event_rx);
-                tokio::pin!(events);
-                while let Some(event) = events.next().await {
-                    event_tx.send(Event::Net(event)).await.ok();
-                }
-            }
-        });
-        while let Ok(command) = self.command_rx.recv().await {
-            match command {
-                Command::Call {
-                    node_id,
-                    audio_config,
-                } => {
-                    let node_id = match iroh::NodeId::from_str(&node_id) {
-                        Ok(node_id) => node_id,
-                        Err(err) => {
-                            self.log(format!("failed to parse node id: {err}")).await;
-                            continue;
-                        }
-                    };
-                    callme::run::connect(
-                        &ep,
-                        audio_config,
-                        node_id,
-                        Some(connect_event_tx.clone()),
-                    )
-                    .await?;
-                }
-                Command::Accept { audio_config } => {
-                    let accept_event_tx = accept_event_tx.clone();
-                    let _accept_task = n0_future::task::spawn({
-                        let ep = ep.clone();
-                        let audio_config = audio_config.clone();
-                        async move {
-                            let res =
-                                callme::run::accept(&ep, audio_config, Some(accept_event_tx)).await;
-                            if let Err(err) = &res {
-                                tracing::error!("accept task failed: {err:?}");
-                            }
-                            res
-                        }
-                    });
-                }
-            }
-        }
-        event_task.await?;
+    async fn emit(&self, event: Event) -> Result<()> {
+        self.event_tx.send(event).await?;
         Ok(())
     }
 
-    async fn log(&self, msg: String) {
-        self.event_tx.send(Event::Log(msg)).await.unwrap();
+    async fn start(
+        event_tx: async_channel::Sender<Event>,
+        command_rx: async_channel::Receiver<Command>,
+    ) -> Result<Self> {
+        let endpoint = callme::net::bind_endpoint().await?;
+        let handler = RtcProtocol::new(endpoint.clone());
+        let _router = Router::builder(endpoint.clone())
+            .accept(RtcProtocol::ALPN, handler.clone())
+            .spawn()
+            .await?;
+        Ok(Self {
+            command_rx,
+            event_tx,
+            active_calls: Default::default(),
+            endpoint,
+            handler,
+            _router,
+            audio_context: None,
+        })
+    }
+
+    async fn run(&mut self) -> Result<()> {
+        self.emit(Event::EndpointBound(self.endpoint.node_id()))
+            .await?;
+        loop {
+            tokio::select! {
+                command = self.command_rx.recv() => {
+                    let command = command?;
+                    self.handle_command(command).await?;
+                }
+                conn = self.handler.accept() => {
+                    let Some(conn) = conn? else {
+                        break;
+                    };
+                    self.handle_incoming(conn).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_incoming(&mut self, conn: RtcConnection) -> Result<()> {
+        let node_id = conn.transport().remote_node_id()?;
+        self.active_calls.insert(node_id, CallInfo::Incoming(conn));
+        self.emit(Event::SetCallState(node_id, CallState::Incoming))
+            .await?;
+        Ok(())
+    }
+    async fn accept(&mut self, conn: RtcConnection) -> Result<()> {
+        let node_id = conn.transport().remote_node_id()?;
+        let task = AbortOnDropHandle::new(tokio::task::spawn({
+            let audio_context = self
+                .audio_context
+                .clone()
+                .context("missing audio context")?;
+            let conn = conn.clone();
+            async move { handle_connection_with_audio_context(audio_context, conn).await }
+        }));
+        self.active_calls
+            .insert(node_id, CallInfo::Active(conn, task));
+        self.emit(Event::SetCallState(node_id, CallState::Active))
+            .await?;
+        Ok(())
+    }
+
+    async fn handle_command(&mut self, command: Command) -> Result<()> {
+        match command {
+            Command::SetAudioConfig { audio_config } => {
+                let audio_context = AudioContext::new(audio_config).await?;
+                self.audio_context = Some(audio_context);
+            }
+            Command::Call { node_id } => {
+                let node_id = match iroh::NodeId::from_str(&node_id) {
+                    Ok(node_id) => node_id,
+                    Err(_err) => {
+                        return Ok(());
+                    }
+                };
+                if self.active_calls.contains_key(&node_id) {
+                    return Ok(());
+                }
+                self.active_calls.insert(node_id, CallInfo::Calling);
+                self.emit(Event::SetCallState(node_id, CallState::Pending))
+                    .await?;
+
+                let conn = self.handler.connect(node_id).await?;
+                self.accept(conn).await?;
+                self.emit(Event::SetCallState(node_id, CallState::Active))
+                    .await?;
+            }
+            Command::HandleIncoming { node_id, accept } => {
+                let Some(CallInfo::Incoming(conn)) = self.active_calls.remove(&node_id) else {
+                    return Ok(());
+                };
+                if accept {
+                    self.accept(conn).await?;
+                } else {
+                    conn.transport().close(0u32.into(), b"bye");
+                    self.emit(Event::SetCallState(node_id, CallState::Aborted))
+                        .await?;
+                }
+            }
+            Command::Abort { node_id } => {
+                if let Some(state) = self.active_calls.remove(&node_id) {
+                    match state {
+                        CallInfo::Calling => {}
+                        CallInfo::Active(conn, abort_on_drop_handle) => {
+                            conn.transport().close(0u32.into(), b"bye");
+                            drop(abort_on_drop_handle);
+                        }
+                        CallInfo::Incoming(conn) => {
+                            conn.transport().close(0u32.into(), b"bye");
+                        }
+                    }
+                    self.emit(Event::SetCallState(node_id, CallState::Aborted))
+                        .await?;
+                }
+            }
+        }
+        Ok(())
     }
 }

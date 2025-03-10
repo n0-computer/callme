@@ -11,9 +11,9 @@ use crate::{
     rtc::{self, RtcConnection},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum NetEvent {
-    Established(NodeId),
+    Established(RtcConnection),
     Closed(NodeId),
 }
 
@@ -37,7 +37,7 @@ pub async fn accept(
     let conn = conn.await?;
     let conn = RtcConnection::new(conn);
     let node_id = conn.transport().remote_node_id()?;
-    send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
+    send(event_tx.as_ref(), NetEvent::Established(conn.clone())).await;
     let audio_ctx = AudioContext::new(audio_config).await?;
     if let Err(err) = rtc::handle_connection_with_audio_context(audio_ctx, conn).await {
         tracing::warn!("connection closed: {err:?}");
@@ -57,7 +57,7 @@ pub async fn connect(
     info!("audio context created");
     let conn = endpoint.connect(node_addr, ALPN).await?;
     let conn = RtcConnection::new(conn);
-    send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
+    send(event_tx.as_ref(), NetEvent::Established(conn.clone())).await;
     info!("established connection to {}", node_id.fmt_short());
 
     info!("creating audio context");
@@ -72,7 +72,7 @@ pub async fn connect(
 }
 
 pub async fn connect_many(
-    ep: &Endpoint,
+    endpoint: &Endpoint,
     audio_config: AudioConfig,
     node_ids: Vec<NodeId>,
     event_tx: Option<async_channel::Sender<NetEvent>>,
@@ -83,11 +83,12 @@ pub async fn connect_many(
     let mut join_set = JoinSet::new();
     for node_id in node_ids {
         let event_tx = event_tx.clone();
-        let ep = ep.clone();
+        let endpoint = endpoint.clone();
         let audio_ctx = audio_ctx.clone();
         join_set.spawn(async move {
-            let conn = net::connect(&ep, node_id).await?;
-            send(event_tx.as_ref(), NetEvent::Established(node_id)).await;
+            let conn = endpoint.connect(node_id, ALPN).await?;
+            let conn = RtcConnection::new(conn);
+            send(event_tx.as_ref(), NetEvent::Established(conn.clone())).await;
             info!("established connection to {}", node_id.fmt_short());
             if let Err(err) = rtc::handle_connection_with_audio_context(audio_ctx, conn).await {
                 tracing::warn!("connection closed: {err:?}");

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use iroh::NodeId;
+// use iroh::NodeId;
 use n0_future::{Stream, StreamExt};
 use serde::Serialize;
 use tracing::level_filters::LevelFilter;
@@ -40,15 +40,17 @@ impl CallmeNode {
         self.0.ep.node_id().to_string()
     }
 
-    pub fn connect(&self, node_id: String) -> Result<JsReadableStream, JsError> {
-        let node_id: NodeId = node_id.parse().map_err(to_js_err)?;
-        let events = self.0.connect(node_id);
-        Ok(into_js_readable_stream(events))
+    pub fn connect(&self, _node_id: String) -> Result<JsReadableStream, JsError> {
+        todo!()
+        // let node_id: NodeId = node_id.parse().map_err(to_js_err)?;
+        // let events = self.0.connect(node_id);
+        // Ok(into_js_readable_stream(events))
     }
 
     pub fn accept(&self) -> JsReadableStream {
-        let events = self.0.accept();
-        into_js_readable_stream(events)
+        todo!()
+        // let events = self.0.accept();
+        // into_js_readable_stream(events)
     }
 }
 
@@ -57,6 +59,7 @@ fn to_js_err(err: impl Into<anyhow::Error>) -> JsError {
     JsError::new(&err.to_string())
 }
 
+#[allow(unused)]
 fn into_js_readable_stream<T: Serialize>(
     stream: impl Stream<Item = T> + 'static,
 ) -> wasm_streams::readable::sys::ReadableStream {
