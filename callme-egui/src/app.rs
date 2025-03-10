@@ -122,8 +122,10 @@ impl AppState {
                 {
                     #[cfg(not(target_os = "android"))]
                     {
-                        self.remote_node_id =
-                            arboard::Clipboard::new().unwrap().get_text().unwrap();
+                        self.remote_node_id = arboard::Clipboard::new()
+                            .expect("failed to access clipboard")
+                            .get_text()
+                            .expect("failed to get text from clipboard");
                     }
 
                     #[cfg(target_os = "android")]
@@ -159,7 +161,7 @@ impl AppState {
                     #[cfg(not(target_os = "android"))]
                     {
                         if let Err(err) = arboard::Clipboard::new()
-                            .unwrap()
+                            .expect("failed to get clipboard")
                             .set_text(node_id.to_string())
                         {
                             warn!("failed to copy text to clipboard: {err}");
@@ -205,7 +207,10 @@ impl AppState {
     }
 
     fn cmd(&self, command: Command) {
-        self.worker.command_tx.send_blocking(command).unwrap();
+        self.worker
+            .command_tx
+            .send_blocking(command)
+            .expect("worker thread is dead");
     }
 
     fn ui_section_config(&mut self, ui: &mut Ui) {
@@ -323,7 +328,9 @@ impl Worker {
                 let mut worker = Worker::start(event_tx, command_rx)
                     .await
                     .expect("worker failed to start");
-                worker.run().await.expect("worker died");
+                if let Err(err) = worker.run().await {
+                    warn!("worker stopped with error: {err:?}");
+                }
             });
         });
         handle

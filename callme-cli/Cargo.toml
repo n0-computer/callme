@@ -2,6 +2,16 @@
 name = "callme-cli"
 version = "0.1.0"
 edition = "2021"
+repository = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+description = "make voicecalls over iroh"
+
+[package.metadata.wix]
+upgrade-guid = "5EE47959-3AF5-4C59-BB50-C27106F2EF0D"
+path-guid = "A8E48474-C88A-430F-904A-019A704E797A"
+license = false
+eula = false
 
 [dependencies]
 anyhow = "1.0.96"
