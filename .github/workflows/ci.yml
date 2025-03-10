@@ -1,0 +1,232 @@
+name: Rust
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -Dwarnings
+  RUSTDOCFLAGS: -Dwarnings
+
+jobs:
+  build_and_test_linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: "Build and test (linux)"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Update apt
+        run: sudo apt update
+      - name: Install alsa
+        run: sudo apt-get install libasound2-dev
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: build
+        run: |
+          cargo build
+
+      - name: build tests
+        run: |
+          cargo nextest run --workspace --lib --bins --tests --no-run
+
+      - name: run tests
+        run: |
+          cargo nextest run --workspace --lib --bins --tests --no-fail-fast
+        env:
+          RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
+
+      - name: run doctests
+        env:
+          RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
+        run: |
+          cargo test --workspace --all-features --doc
+
+  build_and_test_macos:
+    runs-on: macOS-latest
+    timeout-minutes: 30
+    name: "Build and test (macOS)"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Update apt
+        run: sudo apt update
+      - name: Install alsa
+        run: sudo apt-get install libasound2-dev
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: build
+        run: |
+          cargo build
+
+      - name: build tests
+        run: |
+          cargo nextest run --workspace --lib --bins --tests --no-run
+
+      - name: run tests
+        run: |
+          cargo nextest run --workspace --lib --bins --tests --no-fail-fast
+        env:
+          RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
+
+      - name: run doctests
+        env:
+          RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
+        run: |
+          cargo test --workspace --all-features --doc
+
+  build_and_test_windows:
+    timeout-minutes: 30
+    name: "Build and test (Windows)"
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git-ref }}
+
+      - name: Install rust
+        run: |
+          rustup toolchain install stable
+          rustup toolchain default stable
+          rustup target add x86_64-pc-windows-msvc
+          rustup set default-host add x86_64-pc-windows-msvc
+
+      - name: Install cargo-nextest
+        shell: powershell
+        run: |
+          $tmp = New-TemporaryFile | Rename-Item -NewName { $_ -replace 'tmp$', 'zip' } -PassThru
+          Invoke-WebRequest -OutFile $tmp https://get.nexte.st/latest/windows
+          $outputDir = if ($Env:CARGO_HOME) { Join-Path $Env:CARGO_HOME "bin" } else { "~/.cargo/bin" }
+          $tmp | Expand-Archive -DestinationPath $outputDir -Force
+          $tmp | Remove-Item
+
+      - name: build
+        run: |
+          cargo build
+
+      - name: build tests
+        run: |
+          cargo nextest run --workspace --lib --bins --tests --no-run
+
+      - name: run tests
+        run: |
+          cargo nextest run --workspace --lib --bins --tests --no-fail-fast
+        env:
+          RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
+
+      - name: run doctests
+        env:
+          RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
+        run: |
+          cargo test --workspace --all-features --doc
+
+  build_and_test_android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v2
+        with:
+          distribution: "temurin"
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-30"
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r28
+
+      - uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-apk
+
+      - name: Build apk
+        run: |
+          keytool -genkey -v -keystore /tmp/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "C=US, O=Android, CN=Android Debug"
+          cargo apk build -p callme-egui --target aarch64-linux-android --lib
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
+          TOOLCHAIN: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64
+          CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
+          CARGO_APK_RELEASE_KEYSTORE: /tmp/debug.keystore
+
+  check_fmt:
+    timeout-minutes: 30
+    name: Chec fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+  check_docs:
+    timeout-minutes: 30
+    name: Check docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2024-05-02
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      - name: Docs
+        run: cargo doc --workspace --all-features --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: --cfg docsrs
+
+  clippy_check:
+    name: Check clippy
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      - name: clippy check (all features)
+        run: cargo clippy --workspace --all-features --all-targets --bins --tests --benches
+
+      - name: clippy check (no features)
+        run: cargo clippy --workspace --no-default-features --lib --bins --tests
+
+      - name: clippy check (default features)
+        run: cargo clippy --workspace --all-targets
