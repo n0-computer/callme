@@ -61,10 +61,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Update apt
-        run: sudo apt update
-      - name: Install alsa
-        run: sudo apt-get install libasound2-dev
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+      - name: Install dependencies
+        run: brew install automake
+
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
         with:
