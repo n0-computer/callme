@@ -11,29 +11,27 @@ on:
   workflow_dispatch:
 
 jobs:
-  publish-android:
+  build-android:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
         with:
-          distribution: "zulu"
-          java-version: "17"
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK
-        run: sdkmanager "ndk;28.0.12674087"
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v2
+        with:
+          distribution: "temurin"
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-32"
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
 
       - uses: taiki-e/cache-cargo-install-action@v2
         with:
@@ -44,9 +42,10 @@ jobs:
           keytool -genkey -v -keystore /tmp/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "C=US, O=Android, CN=Android Debug"
           cargo apk build -p callme-egui --target aarch64-linux-android --lib --release
         env:
-          ANDROID_NDK: ${{ env.ANDROID_HOME }}/ndk/28.0.12433566
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/28.0.12433566
-          TOOLCHAIN: ${{ env.ANDROID_HOME }}/ndk/28.0.12433566/toolchains/llvm/prebuilt/linux-x86_64
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
+          TOOLCHAIN: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64
           CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
           CARGO_APK_RELEASE_KEYSTORE: /tmp/debug.keystore
 
