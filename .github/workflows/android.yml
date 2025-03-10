@@ -30,10 +30,14 @@ jobs:
       - name: Install NDK
         run: sdkmanager "ndk;28.0.12674087"
 
-      - name: install Rust stable
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+
+      - uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-apk
 
       - name: Build apk
         run: |
