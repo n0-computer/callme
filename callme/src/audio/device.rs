@@ -45,8 +45,14 @@ pub enum Direction {
 
 pub fn list_devices() -> Result<Devices> {
     let host = cpal::default_host();
-    let input = list_input_devices(&host)?;
-    let output = list_output_devices(&host)?;
+    let input = host
+        .input_devices()?
+        .filter_map(|x| x.name().ok())
+        .collect();
+    let output = host
+        .output_devices()?
+        .filter_map(|x| x.name().ok())
+        .collect();
     Ok(Devices { input, output })
 }
 
@@ -152,20 +158,6 @@ pub fn output_stream_config(device: &Device, params: &StreamParams) -> Result<St
         sample_format,
         config,
     })
-}
-
-pub fn list_input_devices(host: &Host) -> Result<Vec<String>> {
-    Ok(host
-        .input_devices()?
-        .filter_map(|x| x.name().ok())
-        .collect())
-}
-
-pub fn list_output_devices(host: &Host) -> Result<Vec<String>> {
-    Ok(host
-        .output_devices()?
-        .filter_map(|x| x.name().ok())
-        .collect())
 }
 
 #[derive(Debug)]

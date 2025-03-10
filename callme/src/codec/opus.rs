@@ -6,7 +6,7 @@ use ringbuf::{
     traits::{Consumer as _, Observer, Producer as _, Split},
     HeapCons as Consumer, HeapProd as Producer,
 };
-use tokio::sync::broadcast;
+use tokio::sync::broadcast::{self, error::TryRecvError};
 use tracing::{info, trace};
 
 use super::Codec;
@@ -39,14 +39,12 @@ pub struct MediaTrackOpusDecoder {
     decoder: opus::Decoder,
     audio_buf: Vec<f32>,
     decode_buf: Vec<f32>,
-    // channels: OpusChannels,
 }
 
 impl MediaTrackOpusDecoder {
     pub fn new(track: MediaTrack) -> Result<Self> {
         let channels = match track.codec() {
             Codec::Opus { channels } => channels,
-            // _ => bail!("track is not an opus track"),
         };
         let decoder =
             opus::Decoder::new(OPUS_STREAM_PARAMS.sample_rate.0, channels.into()).unwrap();
@@ -58,15 +56,13 @@ impl MediaTrackOpusDecoder {
             decoder,
             audio_buf,
             decode_buf,
-            // channels,
         })
     }
 }
 
 impl AudioSource for MediaTrackOpusDecoder {
-    /// Should be called in a 20ms interval with a buf of len 960 * channel_count.
     fn tick(&mut self, buf: &mut [f32]) -> Result<ControlFlow<(), usize>> {
-        // while self.audio_buf.len() < buf.len() {
+        // decode everything that is ready to recv'd on the track channel.
         loop {
             let (skipped_frames, payload) = match self.track.try_recv() {
                 Ok(frame) => {
@@ -78,15 +74,15 @@ impl AudioSource for MediaTrackOpusDecoder {
                     trace!("opus decoder: mediatrack recv frame");
                     (skipped_frames, Some(payload))
                 }
-                Err(broadcast::error::TryRecvError::Empty) => {
+                Err(TryRecvError::Empty) => {
                     trace!("opus decoder: mediatrack recv empty");
                     break;
                 }
-                Err(broadcast::error::TryRecvError::Lagged(count)) => {
+                Err(TryRecvError::Lagged(count)) => {
                     trace!("opus decoder: mediatrack recv lagged {count}");
                     (Some(count as u32), None)
                 }
-                Err(broadcast::error::TryRecvError::Closed) => {
+                Err(TryRecvError::Closed) => {
                     info!("stop opus to audio loop: media track sender dropped");
                     return Ok(ControlFlow::Break(()));
                 }
@@ -115,15 +111,16 @@ impl AudioSource for MediaTrackOpusDecoder {
             }
         }
 
-        let len = buf.len().min(self.audio_buf.len());
-        buf[..len].copy_from_slice(&self.audio_buf[..len]);
-        let end = self.audio_buf.len() - len;
-        self.audio_buf.copy_within(end.., 0);
-        self.audio_buf.truncate(self.audio_buf.len() - len);
+        if self.audio_buf.len() < buf.len() {
+            Ok(ControlFlow::Continue(0))
+        } else {
+            let count = buf.len();
+            buf.copy_from_slice(&self.audio_buf[..count]);
+            self.audio_buf.copy_within(count.., 0);
+            self.audio_buf.truncate(self.audio_buf.len() - count);
 
-        // when falling out of sync too much, warn and drop old frames?
-
-        Ok(ControlFlow::Continue(len))
+            Ok(ControlFlow::Continue(count))
+        }
     }
 }
 
@@ -135,11 +132,12 @@ pub struct MediaTrackOpusEncoder {
 impl MediaTrackOpusEncoder {
     pub fn new(channel_frame_cap: usize, params: StreamParams) -> Result<(Self, MediaTrack)> {
         let (sender, receiver) = broadcast::channel(channel_frame_cap);
-        let channels = match params.channel_count {
-            1 => OpusChannels::Mono,
-            2 => OpusChannels::Stereo,
-            _ => bail!("unsupported channel count"),
-        };
+        let channels = OpusChannels::Mono;
+        // let channels = match params.channel_count {
+        //     1 => OpusChannels::Mono,
+        //     2 => OpusChannels::Stereo,
+        //     _ => bail!("unsupported channel count"),
+        // };
         let track = MediaTrack::new(receiver, Codec::Opus { channels }, TrackKind::Audio);
         let encoder = MediaTrackOpusEncoder {
             sender,
@@ -161,7 +159,7 @@ impl AudioSink for MediaTrackOpusEncoder {
             };
             match self.sender.send(frame) {
                 Err(_) => {
-                    tracing::info!("closing encoder loop: track receiver closed.");
+                    info!("closing encoder loop: track receiver closed.");
                     return Ok(ControlFlow::Break(()));
                 }
                 Ok(_) => {
@@ -183,11 +181,13 @@ pub struct OpusEncoder {
 impl OpusEncoder {
     pub fn new(params: StreamParams) -> Self {
         let samples_per_frame = params.frame_buffer_size(DURATION_20MS);
-        tracing::info!("recorder: opus params {params:?}");
-        tracing::info!("recorder: opus samples per frame {samples_per_frame}");
+        let channels = match params.channel_count {
+            1 => OpusChannels::Mono,
+            _ => OpusChannels::Stereo,
+        };
         let encoder = opus::Encoder::new(
             params.sample_rate.0,
-            opus::Channels::Mono,
+            channels.into(),
             opus::Application::Voip,
         )
         .unwrap();

@@ -246,9 +246,9 @@ fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Def
         config,
         move |data: &mut [S], info: &_| {
             let _guard = span.enter();
-            if tick < 2 {
-                debug!("[{tick}] stream started. len={} inc={}", data.len(), state.consumer.occupied_len());
-            }
+            // if tick < 2 {
+            //     debug!("[{tick}] stream started. len={} inc={}", data.len(), state.consumer.occupied_len());
+            // }
 
             let output_delay = info
                 .timestamp()
@@ -259,12 +259,8 @@ fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Def
             state.processor.set_playback_delay(output_delay + resampler_delay);
 
             // pop from channel
-            // let len_pre = unprocessed.len();
-            // let empty_pre = unprocessed.iter().filter(|x| **x == 0.).count();
             unprocessed.extend(state.consumer.pop_iter());
-            // let len_post= unprocessed.len();
-            // let empty_post = unprocessed.iter().filter(|x| **x == 0.).count();
-            // trace!("data {} len_pre {len_pre} len_post {len_post} empty_pre {empty_pre} empty_post {empty_post}", data.len());
+
             // process
             let mut chunks = unprocessed.chunks_exact_mut(frame_size);
             for chunk in &mut chunks {
@@ -286,12 +282,12 @@ fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Def
 
             // copy to out
             let out_len = resampled.len().min(data.len());
-            let resampled_remaining = resampled.len() - out_len;
+            let remaining = resampled.len() - out_len;
             for (i, sample) in data[..out_len].iter_mut().enumerate() {
                 *sample = resampled[i].to_sample()
             }
             resampled.copy_within(out_len.., 0);
-            resampled.truncate(resampled_remaining);
+            resampled.truncate(remaining);
 
             // trace!("out_len {out_len} resampled_remaining {} processed_remaining {}", resampled.len(), processed.len());
             if out_len < data.len() {
