@@ -2,6 +2,16 @@
 name = "callme-cli"
 version = "0.1.0"
 edition = "2021"
+repository = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+description = "make voicecalls over iroh"
+
+[package.metadata.wix]
+upgrade-guid = "5EE47959-3AF5-4C59-BB50-C27106F2EF0D"
+path-guid = "A8E48474-C88A-430F-904A-019A704E797A"
+license = false
+eula = false
 
 [dependencies]
 anyhow = "1.0.96"
@@ -10,3 +20,5 @@ callme = { version = "0.1.0", path = "../callme" }
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "rt"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+iroh = { version = "0.33.0", default-features = false }
+dialoguer = "0.11.0"

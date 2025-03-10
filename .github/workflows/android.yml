@@ -1,0 +1,56 @@
+name: "build android"
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+
+  workflow_dispatch:
+
+jobs:
+  publish-android:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: sdkmanager "ndk;28.0.12674087"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-apk
+
+      - name: Build apk
+        run: |
+          keytool -genkey -v -keystore /tmp/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "C=US, O=Android, CN=Android Debug"
+          cargo apk build -p callme-egui --target aarch64-linux-android --lib --release
+        env:
+          ANDROID_NDK: ${{ env.ANDROID_HOME }}/ndk/28.0.12433566
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/28.0.12433566
+          TOOLCHAIN: ${{ env.ANDROID_HOME }}/ndk/28.0.12433566/toolchains/llvm/prebuilt/linux-x86_64
+          CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
+          CARGO_APK_RELEASE_KEYSTORE: /tmp/debug.keystore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: callme-egui.apk
+          path: ./target/release/apk/callme-egui.apk

@@ -1,17 +1,29 @@
+
 [workspace]
 resolver = "2"
 members = ["callme", "callme-cli", "callme-egui", "callme-web"]
 
-[patch."https://github.com/dignifiedquire/iroh-roq.git"]
-iroh-roq = { git = "https://github.com/Frando/iroh-roq.git", branch = "Frando/dev" }
-# iroh-roq = { path = "../iroh-roq" }
+[workspace.package]
+authors = ["Frando <franz@n0.computer>", "n0 team"]
+repository = "https://github.com/n0-computer/callme.git"
+license = "MIT OR Apache-2.0"
 
+[patch.crates-io]
+# dial down logging:
+iroh-roq = { git = "https://github.com/Frando/iroh-roq.git", branch = "fix/less-logs" }
+# fix android device names: https://github.com/RustAudio/cpal/pull/959
+cpal = { git = "https://github.com/Frando/cpal.git", branch = "feat/android-device-name" }
+
+# fix android build: https://github.com/tonarino/webrtc-audio-processing/pull/47
+webrtc-audio-processing = { git = "https://github.com/Frando/webrtc-audio-processing.git", branch = "fix/android-build" }
+webrtc-audio-processing-sys = { git = "https://github.com/Frando/webrtc-audio-processing.git", branch = "fix/android-build" }
+# webrtc-audio-processing-sys = { path = "../webrtc-audio-processing/webrtc-audio-processing-sys" }
+# webrtc-audio-processing = { path = "../webrtc-audio-processing" }
+#
 # this is needed for compiling to wasm
-#[patch.crates-io]
 # webrtc-util = { git = "https://github.com/Frando/webrtc.git", branch = "fix/util-feature-flags" }
 
-# debugging
-# [patch.crates-io]
-# iroh-quinn = { path = "../iroh-quinn/quinn" }
-# iroh-quinn-proto = { path = "../iroh-quinn/quinn-proto" }
-# iroh-quinn-udp = { path = "../iroh-quinn/quinn-udp" }
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
