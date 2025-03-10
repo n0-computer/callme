@@ -31,7 +31,7 @@ jobs:
       - uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: r28b
+          ndk-version: r28
 
       - uses: taiki-e/cache-cargo-install-action@v2
         with:
