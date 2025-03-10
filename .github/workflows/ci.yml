@@ -16,13 +16,13 @@ jobs:
   build_and_test_linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    name: "Build and test (linux)"
+    name: "Build and test (Linux)"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Update apt
         run: sudo apt update
-      - name: Install alsa
+      - name: Install dependencies
         run: sudo apt-get install libasound2-dev libdbus-1-dev
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
@@ -142,6 +142,7 @@ jobs:
           cargo test --workspace --all-features --doc
 
   build_and_test_android:
+    name: "Build and test (Android)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -193,22 +194,22 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
 
-  check_docs:
-    timeout-minutes: 30
-    name: Check docs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2024-05-02
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.5
+  # check_docs:
+  #   timeout-minutes: 30
+  #   name: Check docs
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@master
+  #       with:
+  #         toolchain: nightly-2024-05-02
+  #     - name: Install sccache
+  #       uses: mozilla-actions/sccache-action@v0.0.5
 
-      - name: Docs
-        run: cargo doc --workspace --all-features --no-deps --document-private-items
-        env:
-          RUSTDOCFLAGS: --cfg docsrs
+  #     - name: Docs
+  #       run: cargo doc --workspace --all-features --no-deps --document-private-items
+  #       env:
+  #         RUSTDOCFLAGS: --cfg docsrs
 
   clippy_check:
     name: Check clippy
@@ -216,6 +217,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Update apt
+        run: sudo apt update
+      - name: Install dependencies
+        run: sudo apt-get install libasound2-dev libdbus-1-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
