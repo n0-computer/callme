@@ -16,7 +16,6 @@ dasp_sample = "0.11.0"
 derive_more = { version = "2.0.1", features = ["debug", "deref"] }
 fixed-resample = "0.6.1"
 futures-concurrency = "7.6.3"
-futures-util = "0.3.31"
 iroh = { version = "0.33.0", default-features = false }
 iroh-roq = "0.1.0"
 n0-future = "0.1.2"
@@ -25,9 +24,7 @@ opus = { git = "https://github.com/DCNick3/opus-rs.git", branch = "unsafe-libopu
     "unsafe-libopus-backend",
 ] }
 rand = "0.8"
-rb = "0.4.1"
 ringbuf = "0.4.7"
-rubato = "0.16.1"
 serde = { version = "1.0.218", features = ["derive"] }
 spin_sleep = "1.3.0"
 tokio = { version = "1.43.0", features = ["sync"] }

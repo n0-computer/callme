@@ -53,3 +53,10 @@ jobs:
         with:
           name: callme-egui.apk
           path: ./target/release/apk/callme-egui.apk
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            target/release/apk/callme-egui.apk

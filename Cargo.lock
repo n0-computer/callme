@@ -838,16 +838,13 @@ dependencies = [
  "derive_more 2.0.1",
  "fixed-resample",
  "futures-concurrency",
- "futures-util",
  "hound",
  "iroh",
  "iroh-roq",
  "n0-future",
  "opus",
  "rand 0.8.5",
- "rb",
  "ringbuf",
- "rubato",
  "serde",
  "spin_sleep",
  "tokio",
@@ -4991,12 +4988,6 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
-
-[[package]]
-name = "rb"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56cf8381505b60ae18a4097f1d0be093287ca3bf4fbb23d36ac5ad3bba335daa"
 
 [[package]]
 name = "rcgen"
