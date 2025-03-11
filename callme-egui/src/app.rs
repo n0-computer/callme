@@ -151,8 +151,7 @@ impl AppState {
 
                     #[cfg(target_os = "android")]
                     let pasted = {
-                        self.remote_node_id = android_clipboard::get_text()
-                            .expect("failed to get text from clipboard")
+                        android_clipboard::get_text().expect("failed to get text from clipboard")
                     };
 
                     let node_id = NodeId::from_str(&pasted);

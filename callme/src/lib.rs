@@ -22,7 +22,7 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
 
     use crate::{
-        audio::{AudioSink, AudioSource, OPUS_STREAM_PARAMS},
+        audio::{AudioSink, AudioSource, ENGINE_FORMAT},
         codec::opus::{MediaTrackOpusDecoder, MediaTrackOpusEncoder},
         net::bind_endpoint,
         rtc::{MediaTrack, RtcProtocol},
@@ -49,10 +49,10 @@ mod tests {
 
         let conn2 = conn2.unwrap();
 
-        let (mut node1, track1) = MediaTrackOpusEncoder::new(4, OPUS_STREAM_PARAMS)?;
+        let (mut node1, track1) = MediaTrackOpusEncoder::new(4, ENGINE_FORMAT)?;
         conn1.send_track(track1.clone()).await?;
 
-        let sample_count = OPUS_STREAM_PARAMS.sample_count(Duration::from_millis(20));
+        let sample_count = ENGINE_FORMAT.sample_count(Duration::from_millis(20));
         // start sending audio at node1
         let (abort_tx, mut abort_rx) = mpsc::channel(1);
         let send_task = tokio::task::spawn(async move {

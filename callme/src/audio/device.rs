@@ -96,7 +96,7 @@ pub fn find_device(host: &cpal::Host, direction: Direction, name: Option<&str>) 
     })
 }
 
-pub fn input_stream_config(device: &Device, params: &AudioFormat) -> Result<StreamInfo> {
+pub fn input_stream_config(device: &Device, format: &AudioFormat) -> Result<StreamInfo> {
     let mut config: Option<cpal::SupportedStreamConfig> = None;
     let mut supported_configs: Vec<_> = device
         .supported_input_configs()
@@ -104,10 +104,10 @@ pub fn input_stream_config(device: &Device, params: &AudioFormat) -> Result<Stre
         .collect();
     supported_configs.sort_by(SupportedStreamConfigRange::cmp_default_heuristics);
     for supported_config in supported_configs.iter().rev() {
-        if supported_config.channels() != params.channel_count {
+        if supported_config.channels() != format.channel_count {
             continue;
         }
-        if let Some(c) = supported_config.try_with_sample_rate(params.sample_rate) {
+        if let Some(c) = supported_config.try_with_sample_rate(format.sample_rate) {
             config = Some(c);
             break;
         }
@@ -121,14 +121,14 @@ pub fn input_stream_config(device: &Device, params: &AudioFormat) -> Result<Stre
     info!("final input config: {config:?}");
     let sample_format = config.sample_format();
     let mut config: cpal::StreamConfig = config.into();
-    config.buffer_size = BufferSize::Fixed(params.sample_count(DURATION_20MS) as u32);
+    config.buffer_size = BufferSize::Fixed(format.sample_count(DURATION_20MS) as u32);
     Ok(StreamInfo {
         sample_format,
         config,
     })
 }
 
-pub fn output_stream_config(device: &Device, params: &AudioFormat) -> Result<StreamInfo> {
+pub fn output_stream_config(device: &Device, format: &AudioFormat) -> Result<StreamInfo> {
     let mut config: Option<cpal::SupportedStreamConfig> = None;
     let mut supported_configs: Vec<_> = device
         .supported_output_configs()
@@ -136,10 +136,10 @@ pub fn output_stream_config(device: &Device, params: &AudioFormat) -> Result<Str
         .collect();
     supported_configs.sort_by(SupportedStreamConfigRange::cmp_default_heuristics);
     for supported_config in supported_configs.iter().rev() {
-        if supported_config.channels() != params.channel_count {
+        if supported_config.channels() != format.channel_count {
             continue;
         }
-        if let Some(c) = supported_config.try_with_sample_rate(params.sample_rate) {
+        if let Some(c) = supported_config.try_with_sample_rate(format.sample_rate) {
             config = Some(c);
             break;
         }
@@ -153,7 +153,7 @@ pub fn output_stream_config(device: &Device, params: &AudioFormat) -> Result<Str
     info!("final output config: {config:?}");
     let sample_format = config.sample_format();
     let mut config: cpal::StreamConfig = config.into();
-    config.buffer_size = BufferSize::Fixed(params.sample_count(DURATION_20MS) as u32);
+    config.buffer_size = BufferSize::Fixed(format.sample_count(DURATION_20MS) as u32);
     Ok(StreamInfo {
         sample_format,
         config,

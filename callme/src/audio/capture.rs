@@ -26,8 +26,7 @@ use tracing::{debug, error, info, span, trace, trace_span, warn, Level};
 
 use super::{
     device::{find_device, input_stream_config, Direction, StreamInfo},
-    AudioFormat, WebrtcAudioProcessor, DURATION_10MS, DURATION_20MS, ENGINE_FORMAT,
-    OPUS_STREAM_PARAMS, SAMPLE_RATE,
+    AudioFormat, WebrtcAudioProcessor, DURATION_10MS, DURATION_20MS, ENGINE_FORMAT, SAMPLE_RATE,
 };
 use crate::{
     codec::opus::MediaTrackOpusEncoder,
@@ -39,11 +38,11 @@ pub trait AudioSink: Send + 'static {
 }
 
 #[derive(Debug, Clone)]
-pub struct AudioRecorder {
+pub struct AudioCapturer {
     sink_sender: mpsc::Sender<Box<dyn AudioSink>>,
 }
 
-impl AudioRecorder {
+impl AudioCapturer {
     pub async fn build(
         host: &cpal::Host,
         device: Option<&str>,
@@ -57,8 +56,7 @@ impl AudioRecorder {
         // device's default stream config is used.
         let stream_info = input_stream_config(&device, &ENGINE_FORMAT)?;
 
-        let capture_format =
-            AudioFormat::new(stream_info.config.sample_rate, stream_info.config.channels);
+        let capture_format = AudioFormat::from(&stream_info.config);
 
         // our ring buffer receives resampled and processed samples.
         let buffer_size = ENGINE_FORMAT.sample_count(DURATION_20MS) * 16;
@@ -69,7 +67,7 @@ impl AudioRecorder {
 
         let (init_tx, init_rx) = oneshot::channel();
         std::thread::spawn(move || {
-            let stream = match start_record_stream(
+            let stream = match start_capture_stream(
                 &device,
                 &stream_info,
                 &capture_format,
@@ -85,11 +83,11 @@ impl AudioRecorder {
                     return;
                 }
             };
-            capture_loop(ENGINE_FORMAT, consumer, sink_receiver);
+            capture_loop(consumer, sink_receiver);
             drop(stream);
         });
         init_rx.await??;
-        let handle = AudioRecorder { sink_sender };
+        let handle = AudioCapturer { sink_sender };
         Ok(handle)
     }
 
@@ -101,20 +99,19 @@ impl AudioRecorder {
     }
 
     pub async fn create_opus_track(&self) -> Result<MediaTrack> {
-        let (encoder, track) = MediaTrackOpusEncoder::new(16, OPUS_STREAM_PARAMS)?;
+        let (encoder, track) = MediaTrackOpusEncoder::new(16, ENGINE_FORMAT)?;
         self.add_sink(encoder).await?;
         Ok(track)
     }
 }
 
-fn start_record_stream(
+fn start_capture_stream(
     device: &Device,
     stream_info: &StreamInfo,
-    capture_params: &AudioFormat,
+    format: &AudioFormat,
     producer: Producer<f32>,
     processor: WebrtcAudioProcessor,
 ) -> Result<cpal::Stream> {
-    info!("capture params: {capture_params:?}");
     let config = &stream_info.config;
 
     #[cfg(feature = "audio-processing")]
@@ -122,40 +119,41 @@ fn start_record_stream(
 
     let resampler = FixedResampler::new(
         NonZeroUsize::new(ENGINE_FORMAT.channel_count as usize).unwrap(),
-        capture_params.sample_rate.0,
+        format.sample_rate.0,
         ENGINE_FORMAT.sample_rate.0,
         ResampleQuality::High,
         true,
     );
     let state = CaptureState {
-        params: capture_params.clone(),
+        format: format.clone(),
         producer,
         processor: processor.clone(),
         resampler,
     };
     let stream = match stream_info.sample_format {
-        SampleFormat::I8 => build_input_stream::<i8>(&device, &config, state),
-        SampleFormat::I16 => build_input_stream::<i16>(&device, &config, state),
-        SampleFormat::I32 => build_input_stream::<i32>(&device, &config, state),
-        SampleFormat::F32 => build_input_stream::<f32>(&device, &config, state),
+        SampleFormat::I8 => build_capture_stream::<i8>(&device, &config, state),
+        SampleFormat::I16 => build_capture_stream::<i16>(&device, &config, state),
+        SampleFormat::I32 => build_capture_stream::<i32>(&device, &config, state),
+        SampleFormat::F32 => build_capture_stream::<f32>(&device, &config, state),
         sample_format => {
             tracing::error!("Unsupported sample format '{sample_format}'");
             Err(cpal::BuildStreamError::StreamConfigNotSupported)
         }
     }?;
+    info!("start capture stream on {} with {format:?}", device.name()?);
     stream.play()?;
     Ok(stream)
 }
 
 struct CaptureState {
-    params: AudioFormat,
+    format: AudioFormat,
     producer: Producer<f32>,
     #[allow(unused)]
     processor: WebrtcAudioProcessor,
     resampler: FixedResampler<f32, 2>,
 }
 
-fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Default>(
+fn build_capture_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Default>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut state: CaptureState,
@@ -165,7 +163,7 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
 
     // if we change this, code in here needs to change, so let's assert it
     debug_assert_eq!(ENGINE_FORMAT.channel_count, 2);
-    debug_assert!(matches!(state.params.channel_count, 1 | 2));
+    debug_assert!(matches!(state.format.channel_count, 1 | 2));
 
     // this needs to be at 10ms = 480 samples per channel, otherwise
     // the WebrtcAudioProcessor panics.
@@ -181,7 +179,7 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
         move |data: &[S], info: &_| {
             let _guard = span.enter();
             let start = Instant::now();
-            let max_tick_time = state.params.duration_from_sample_count(data.len());
+            let max_tick_time = state.format.duration_from_sample_count(data.len());
 
             let delay = {
                 let capture_delay = info
@@ -195,21 +193,14 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
                 capture_delay + resampler_delay
             };
 
-            if tick % 100 == 0 {
-                trace!(
-                    "record stream tick {tick} len={} delay={delay:?}",
-                    data.len(),
-                );
-            }
-
             // adjust sample format and channel count.
-            if state.params.channel_count == 1 {
+            if state.format.channel_count == 1 {
                 input_buf.extend(
                     data.iter()
                         .map(|s| s.to_sample())
                         .flat_map(|s| [s, s].into_iter()),
                 );
-            } else if state.params.channel_count == 2 {
+            } else if state.format.channel_count == 2 {
                 input_buf.extend(data.iter().map(|s| s.to_sample()));
             } else {
                 // checked above.
@@ -254,11 +245,11 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
             resampled_buf.copy_within(end.., 0);
             resampled_buf.truncate(remainder_len);
 
-            let elapsed = start.elapsed();
             trace!(
-                "tick {tick}: had {:?} took {:?} / get {} push {}",
+                "tick {tick}: delay={:?} available={:?} time={:?} / get {} push {} samples",
+                delay,
                 max_tick_time,
-                elapsed,
+                start.elapsed(),
                 data.len(),
                 pushed
             );
@@ -272,7 +263,6 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
 }
 
 fn capture_loop(
-    params: AudioFormat,
     mut consumer: Consumer<f32>,
     mut sink_receiver: mpsc::Receiver<Box<dyn AudioSink>>,
 ) {
@@ -281,13 +271,13 @@ fn capture_loop(
     info!("capture loop start");
 
     let tick_duration = DURATION_20MS;
-    let frame_size = params.sample_count(tick_duration);
-    let mut buf = vec![0.; frame_size];
+    let samples_per_tick = ENGINE_FORMAT.sample_count(tick_duration);
+    let mut buf = vec![0.; samples_per_tick];
     let mut sinks = vec![];
 
     if let Err(err) = audio_thread_priority::promote_current_thread_to_real_time(
-        frame_size as u32,
-        params.sample_rate.0,
+        samples_per_tick as u32,
+        ENGINE_FORMAT.sample_rate.0,
     ) {
         warn!("failed to set capture thread to realtime priority: {err:?}");
     }
