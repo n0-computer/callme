@@ -3,7 +3,7 @@ use crate::rtc::TrackKind;
 
 pub mod opus;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Codec {
     Opus { channels: OpusChannels },

@@ -20,7 +20,7 @@ pub const OPUS_STREAM_PARAMS: AudioFormat = AudioFormat::new2(OPUS_SAMPLE_RATE, 
 
 const DURATION_20MS: Duration = Duration::from_millis(20);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum OpusChannels {
     Mono = 1,
     Stereo = 2,

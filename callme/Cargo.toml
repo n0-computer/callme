@@ -45,5 +45,7 @@ cpal = { version = "0.15.3", features = ["wasm-bindgen"] }
 [dev-dependencies]
 clap = { version = "4.5.31", features = ["derive"] }
 hound = "3.5.1"
+testresult = "0.4.1"
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = "0.3.19"
+tracing-test = "0.2.5"
