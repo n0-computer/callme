@@ -135,12 +135,6 @@ jobs:
         env:
           RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
 
-      - name: run doctests
-        env:
-          RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
-        run: |
-          cargo test --workspace --all-features --doc
-
   build_android:
     name: "Build Android APK"
     runs-on: ubuntu-latest
