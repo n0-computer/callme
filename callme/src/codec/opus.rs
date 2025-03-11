@@ -11,11 +11,12 @@ use tracing::{info, trace};
 
 use super::Codec;
 use crate::{
-    audio::{AudioSink, AudioSource, StreamParams, SAMPLE_RATE},
+    audio::{AudioFormat, AudioSink, AudioSource, SAMPLE_RATE},
     rtc::{MediaFrame, MediaTrack, TrackKind},
 };
 
-pub const OPUS_STREAM_PARAMS: StreamParams = StreamParams::new(SAMPLE_RATE, 1);
+pub const OPUS_SAMPLE_RATE: u32 = 48_000;
+pub const OPUS_STREAM_PARAMS: AudioFormat = AudioFormat::new2(OPUS_SAMPLE_RATE, 2);
 
 const DURATION_20MS: Duration = Duration::from_millis(20);
 
@@ -39,16 +40,20 @@ pub struct MediaTrackOpusDecoder {
     decoder: opus::Decoder,
     audio_buf: Vec<f32>,
     decode_buf: Vec<f32>,
+    underflows: usize,
+    remaining_silence_ticks: usize,
+    audio_format: AudioFormat,
 }
 
 impl MediaTrackOpusDecoder {
     pub fn new(track: MediaTrack) -> Result<Self> {
-        let channels = match track.codec() {
+        let channel_count = match track.codec() {
             Codec::Opus { channels } => channels,
         };
+        let audio_format = AudioFormat::new2(OPUS_SAMPLE_RATE, channel_count as u16);
         let decoder =
-            opus::Decoder::new(OPUS_STREAM_PARAMS.sample_rate.0, channels.into()).unwrap();
-        let buffer_size = OPUS_STREAM_PARAMS.frame_buffer_size(DURATION_20MS);
+            opus::Decoder::new(OPUS_STREAM_PARAMS.sample_rate.0, channel_count.into()).unwrap();
+        let buffer_size = audio_format.sample_count(DURATION_20MS);
         let decode_buf = vec![0.; buffer_size];
         let audio_buf = vec![];
         Ok(Self {
@@ -56,6 +61,9 @@ impl MediaTrackOpusDecoder {
             decoder,
             audio_buf,
             decode_buf,
+            underflows: 0,
+            remaining_silence_ticks: 0,
+            audio_format,
         })
     }
 }
@@ -89,29 +97,40 @@ impl AudioSource for MediaTrackOpusDecoder {
             };
             if let Some(skipped_count) = skipped_frames {
                 for _ in 0..skipped_count {
-                    let count = self
-                        .decoder
-                        .decode_float(&[], &mut self.decode_buf, false)?;
-                    self.audio_buf.extend(&self.decode_buf[..count]);
+                    let block_count =
+                        self.decoder
+                            .decode_float(&[], &mut self.decode_buf, false)?;
+                    let sample_count = block_count * self.audio_format.channel_count as usize;
+                    self.audio_buf.extend(&self.decode_buf[..sample_count]);
                     trace!(
-                        "decoder: {count} samples from skipped frames, now at {}",
+                        "decoder: {sample_count} samples from skipped frames, now at {}",
                         self.audio_buf.len()
                     );
                 }
             }
             if let Some(payload) = payload {
-                let count = self
-                    .decoder
-                    .decode_float(&payload, &mut self.decode_buf, false)?;
-                self.audio_buf.extend(&self.decode_buf[..count]);
+                let block_count =
+                    self.decoder
+                        .decode_float(&payload, &mut self.decode_buf, false)?;
+                let sample_count = block_count * self.audio_format.channel_count as usize;
+                self.audio_buf.extend(&self.decode_buf[..sample_count]);
                 trace!(
-                    "decoder: {count} samples from payload, now at {}",
+                    "decoder: {sample_count} samples from payload, now at {}",
                     self.audio_buf.len()
                 );
             }
         }
 
-        if self.audio_buf.len() < buf.len() {
+        if self.remaining_silence_ticks > 0 {
+            self.remaining_silence_ticks -= 1;
+            Ok(ControlFlow::Continue(0))
+        } else if self.audio_buf.len() < buf.len() {
+            self.underflows += 1;
+            if self.underflows > 2 {
+                self.remaining_silence_ticks = 8;
+                tracing::debug!("increase silence");
+                self.underflows = 0;
+            }
             Ok(ControlFlow::Continue(0))
         } else {
             let count = buf.len();
@@ -130,18 +149,18 @@ pub struct MediaTrackOpusEncoder {
 }
 
 impl MediaTrackOpusEncoder {
-    pub fn new(channel_frame_cap: usize, params: StreamParams) -> Result<(Self, MediaTrack)> {
+    pub fn new(channel_frame_cap: usize, audio_format: AudioFormat) -> Result<(Self, MediaTrack)> {
+        debug_assert_eq!(audio_format.sample_rate.0, OPUS_SAMPLE_RATE);
         let (sender, receiver) = broadcast::channel(channel_frame_cap);
-        let channels = OpusChannels::Mono;
-        // let channels = match params.channel_count {
-        //     1 => OpusChannels::Mono,
-        //     2 => OpusChannels::Stereo,
-        //     _ => bail!("unsupported channel count"),
-        // };
+        let channels = match audio_format.channel_count {
+            1 => OpusChannels::Mono,
+            2 => OpusChannels::Stereo,
+            _ => bail!("unsupported channel count"),
+        };
         let track = MediaTrack::new(receiver, Codec::Opus { channels }, TrackKind::Audio);
         let encoder = MediaTrackOpusEncoder {
             sender,
-            encoder: OpusEncoder::new(params),
+            encoder: OpusEncoder::new(audio_format),
         };
         Ok((encoder, track))
     }
@@ -179,8 +198,8 @@ pub struct OpusEncoder {
 }
 
 impl OpusEncoder {
-    pub fn new(params: StreamParams) -> Self {
-        let samples_per_frame = params.frame_buffer_size(DURATION_20MS);
+    pub fn new(params: AudioFormat) -> Self {
+        let samples_per_frame = params.sample_count(DURATION_20MS);
         let channels = match params.channel_count {
             1 => OpusChannels::Mono,
             _ => OpusChannels::Stereo,

@@ -66,7 +66,7 @@ impl RtcConnection {
         Ok(())
     }
 
-    pub async fn recv_track(&self) -> Result<MediaTrack> {
+    pub async fn recv_track(&self) -> Result<Option<MediaTrack>> {
         let flow_id = self.next_recv_flow_id.fetch_add(1, Ordering::SeqCst);
         let recv_flow = self.session.new_receive_flow(flow_id.into()).await?;
         let (track_sender, track_receiver) = broadcast::channel(12);
@@ -80,13 +80,22 @@ impl RtcConnection {
             receiver.run().await;
             info!("rtp receiver closed");
         });
-        let codec = init_rx.await??;
+        let closed = self.transport().closed();
+        let codec = tokio::select! {
+            res = init_rx =>  res??,
+            err = closed => {
+                match err {
+                    iroh::endpoint::ConnectionError::LocallyClosed => return Ok(None),
+                    err => return Err(err.into())
+                }
+            }
+        };
         let track = MediaTrack {
             receiver: track_receiver,
             codec,
             kind: codec.kind(),
         };
-        Ok(track)
+        Ok(Some(track))
     }
 }
 
@@ -97,8 +106,7 @@ pub async fn handle_connection_with_audio_context(
     let capture_track = audio_ctx.capture_track().await?;
     conn.send_track(capture_track).await?;
     info!("added capture track to rtc connection");
-    loop {
-        let remote_track = conn.recv_track().await?;
+    while let Some(remote_track) = conn.recv_track().await? {
         info!(
             "new remote track: {:?} {:?}",
             remote_track.kind(),
@@ -111,4 +119,5 @@ pub async fn handle_connection_with_audio_context(
             TrackKind::Video => unimplemented!(),
         }
     }
+    Ok(())
 }

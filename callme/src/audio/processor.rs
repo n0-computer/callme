@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::Result;
 use dasp_sample::ToSample;
+use tracing::info;
 use webrtc_audio_processing::{
     Config, EchoCancellation, EchoCancellationSuppressionLevel, InitializationConfig,
     NoiseSuppression, NoiseSuppressionLevel,
@@ -19,26 +20,20 @@ pub struct WebrtcAudioProcessor(Arc<Inner>);
 #[derive(derive_more::Debug)]
 struct Inner {
     #[debug("Processor")]
-    inner: Mutex<webrtc_audio_processing::Processor>,
+    inner: Mutex<Option<webrtc_audio_processing::Processor>>,
     config: Mutex<Config>,
     capture_delay: AtomicU64,
     playback_delay: AtomicU64,
     enabled: AtomicBool,
+    capture_channels: AtomicUsize,
+    playback_channels: AtomicUsize,
 }
 
 impl WebrtcAudioProcessor {
     pub fn new(
-        num_capture_channels: i32,
-        num_render_channels: i32,
         echo_cancellation_suppression_level: Option<EchoCancellationSuppressionLevel>,
         enabled: bool,
     ) -> Result<Self> {
-        let mut processor = webrtc_audio_processing::Processor::new(&InitializationConfig {
-            num_capture_channels,
-            num_render_channels,
-            ..InitializationConfig::default()
-        })?;
-
         let suppression_level = echo_cancellation_suppression_level
             .unwrap_or(EchoCancellationSuppressionLevel::Moderate);
         // High pass filter is a prerequisite to running echo cancellation.
@@ -56,14 +51,16 @@ impl WebrtcAudioProcessor {
             // }),
             ..Config::default()
         };
-        processor.set_config(config.clone());
-        tracing::info!("init audio processor (enabled={enabled})");
+        // processor.set_config(config.clone());
+        info!("init audio processor (enabled={enabled})");
         Ok(Self(Arc::new(Inner {
-            inner: Mutex::new(processor),
+            inner: Mutex::new(None),
             config: Mutex::new(config),
             capture_delay: Default::default(),
             playback_delay: Default::default(),
             enabled: AtomicBool::new(enabled),
+            capture_channels: Default::default(),
+            playback_channels: Default::default(),
         })))
     }
 
@@ -73,6 +70,35 @@ impl WebrtcAudioProcessor {
 
     pub fn set_enabled(&self, enabled: bool) {
         let _prev = self.0.enabled.swap(enabled, Ordering::SeqCst);
+    }
+
+    pub fn init_capture(&self, channels: usize) -> Result<()> {
+        self.0.capture_channels.store(channels, Ordering::SeqCst);
+        if self.0.playback_channels.load(Ordering::SeqCst) > 0 {
+            self.init()?;
+        }
+        Ok(())
+    }
+
+    pub fn init_playback(&self, channels: usize) -> Result<()> {
+        self.0.playback_channels.store(channels, Ordering::SeqCst);
+        if self.0.capture_channels.load(Ordering::SeqCst) > 0 {
+            self.init()?;
+        }
+        Ok(())
+    }
+
+    fn init(&self) -> Result<()> {
+        let playback_channels = self.0.playback_channels.load(Ordering::SeqCst);
+        let capture_channels = self.0.playback_channels.load(Ordering::SeqCst);
+        let mut processor = webrtc_audio_processing::Processor::new(&InitializationConfig {
+            num_capture_channels: capture_channels as i32,
+            num_render_channels: playback_channels as i32,
+            ..InitializationConfig::default()
+        })?;
+        processor.set_config(self.0.config.lock().unwrap().clone());
+        *self.0.inner.lock().unwrap() = Some(processor);
+        Ok(())
     }
 
     /// Processes and modifies the audio frame from a capture device by applying
@@ -86,7 +112,11 @@ impl WebrtcAudioProcessor {
         if !self.is_enabled() {
             return Ok(());
         }
-        self.0.inner.lock().unwrap().process_capture_frame(frame)
+        if let Some(processor) = self.0.inner.lock().unwrap().as_mut() {
+            processor.process_capture_frame(frame)
+        } else {
+            Ok(())
+        }
     }
     /// Processes and optionally modifies the audio frame from a playback device.
     /// `frame` should hold an interleaved `f32` audio frame, with
@@ -98,7 +128,11 @@ impl WebrtcAudioProcessor {
         if !self.is_enabled() {
             return Ok(());
         }
-        self.0.inner.lock().unwrap().process_render_frame(frame)
+        if let Some(processor) = self.0.inner.lock().unwrap().as_mut() {
+            processor.process_render_frame(frame)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn set_capture_delay(&self, stream_delay: Duration) {
@@ -114,7 +148,7 @@ impl WebrtcAudioProcessor {
                     }
                 })
         {
-            tracing::info!("changing capture delay from {old_val} to {new_val}");
+            info!("changing capture delay from {old_val} to {new_val}");
             self.update_stream_delay();
         }
     }
@@ -132,7 +166,7 @@ impl WebrtcAudioProcessor {
                     }
                 })
         {
-            tracing::info!("changing playback delay from {old_val} to {new_val}");
+            info!("changing playback delay from {old_val} to {new_val}");
             self.update_stream_delay();
         }
     }
@@ -142,8 +176,9 @@ impl WebrtcAudioProcessor {
         let capture = self.0.capture_delay.load(Ordering::Relaxed);
         let total = playback + capture;
         let mut config = self.0.config.lock().unwrap();
-        let mut inner = self.0.inner.lock().unwrap();
         config.echo_cancellation.as_mut().unwrap().stream_delay_ms = Some(total as i32);
-        inner.set_config(config.clone());
+        if let Some(processor) = self.0.inner.lock().unwrap().as_mut() {
+            processor.set_config(config.clone());
+        }
     }
 }

@@ -21,7 +21,7 @@ use tracing::{debug, error, info, trace, trace_span, warn, Level};
 use super::{
     device::{find_device, output_stream_config, Direction, StreamInfo},
     processor::WebrtcAudioProcessor,
-    StreamParams, DURATION_10MS, DURATION_20MS, OPUS_STREAM_PARAMS, SAMPLE_RATE,
+    AudioFormat, DURATION_10MS, DURATION_20MS, OPUS_STREAM_PARAMS, SAMPLE_RATE,
 };
 use crate::{
     codec::opus::MediaTrackOpusDecoder,
@@ -46,8 +46,8 @@ impl AudioPlayer {
         let device = find_device(host, Direction::Output, device)?;
         let stream_info = output_stream_config(&device, &OPUS_STREAM_PARAMS)?;
 
-        let params = StreamParams::new(stream_info.config.sample_rate, stream_info.config.channels);
-        let buffer_size = params.frame_buffer_size(DURATION_20MS) * 16;
+        let params = AudioFormat::new(stream_info.config.sample_rate, stream_info.config.channels);
+        let buffer_size = params.sample_count(DURATION_20MS) * 32;
         let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
 
         let (source_sender, track_receiver) = mpsc::channel(16);
@@ -88,7 +88,7 @@ impl AudioPlayer {
 }
 
 fn playback_loop(
-    params: StreamParams,
+    params: AudioFormat,
     mut producer: Producer<f32>,
     mut source_receiver: mpsc::Receiver<Box<dyn AudioSource>>,
 ) {
@@ -97,7 +97,7 @@ fn playback_loop(
     info!("playback loop start");
 
     let tick_duration = DURATION_20MS;
-    let frame_size = params.frame_buffer_size(tick_duration);
+    let frame_size = params.sample_count(tick_duration);
     let mut work_buf = vec![0.; frame_size];
     let mut out_buf = vec![0.; frame_size];
     let mut sources: Vec<Box<dyn AudioSource>> = vec![];
@@ -110,7 +110,7 @@ fn playback_loop(
     }
 
     // todo: do we want this?
-    let initial_latency = params.frame_buffer_size(DURATION_20MS * 4);
+    let initial_latency = params.sample_count(DURATION_20MS * 8);
     let initial_silence = vec![0.; initial_latency];
     let n = producer.push_slice(&initial_silence);
     debug_assert_eq!(n, initial_silence.len());
@@ -185,11 +185,13 @@ fn playback_loop(
 fn start_playback_stream(
     device: &Device,
     stream_info: &StreamInfo,
-    params: StreamParams,
+    params: AudioFormat,
     processor: WebrtcAudioProcessor,
     consumer: Consumer<f32>,
 ) -> Result<cpal::Stream> {
+    info!("playback params: {params:?}");
     let config = &stream_info.config;
+    processor.init_playback(config.channels as usize)?;
     let resampler = FixedResampler::new(
         NonZeroUsize::new(params.channel_count as usize).unwrap(),
         SAMPLE_RATE.0,
@@ -219,7 +221,7 @@ fn start_playback_stream(
 }
 
 struct PlaybackState {
-    params: StreamParams,
+    params: AudioFormat,
     resampler: FixedResampler<f32, 2>,
     processor: WebrtcAudioProcessor,
     consumer: Consumer<f32>,
@@ -230,7 +232,7 @@ fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Def
     config: &cpal::StreamConfig,
     mut state: PlaybackState,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
-    let frame_size = state.params.frame_buffer_size(DURATION_10MS);
+    let frame_size = state.params.sample_count(DURATION_10MS);
     let mut unprocessed: Vec<f32> = Vec::with_capacity(frame_size);
     let mut processed: Vec<f32> = Vec::with_capacity(frame_size);
     let mut resampled: Vec<f32> = Vec::with_capacity(frame_size);

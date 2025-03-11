@@ -27,7 +27,7 @@ use tracing::{debug, error, info, span, trace, trace_span, warn, Level};
 use super::{
     device::{find_device, input_stream_config, Direction, StreamInfo},
     processor::WebrtcAudioProcessor,
-    StreamParams, DURATION_10MS, DURATION_20MS, OPUS_STREAM_PARAMS, SAMPLE_RATE,
+    AudioFormat, DURATION_10MS, DURATION_20MS, ENGINE_FORMAT, OPUS_STREAM_PARAMS, SAMPLE_RATE,
 };
 use crate::{
     codec::opus::MediaTrackOpusEncoder,
@@ -50,14 +50,21 @@ impl AudioRecorder {
         processor: WebrtcAudioProcessor,
     ) -> Result<Self> {
         let device = find_device(host, Direction::Input, device)?;
-        let params = OPUS_STREAM_PARAMS;
-        let stream_info = input_stream_config(&device, &params)?;
 
-        let capture_params =
-            StreamParams::new(stream_info.config.sample_rate, stream_info.config.channels);
-        let buffer_size = capture_params.frame_buffer_size(DURATION_20MS) * 16;
+        // find a config for the capture stream. note that the return config may not
+        // match the format. the passed format is a hint as to which stream config
+        // to prefer if there are multiple. if no matching format is found, the
+        // device's default stream config is used.
+        let stream_info = input_stream_config(&device, &ENGINE_FORMAT)?;
+
+        let capture_format =
+            AudioFormat::new(stream_info.config.sample_rate, stream_info.config.channels);
+
+        // our ring buffer receives resampled and processed samples.
+        let buffer_size = ENGINE_FORMAT.sample_count(DURATION_20MS) * 16;
         let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
 
+        // a channel to pass new sinks to the the audio thread.
         let (sink_sender, sink_receiver) = mpsc::channel(16);
 
         let (init_tx, init_rx) = oneshot::channel();
@@ -65,7 +72,7 @@ impl AudioRecorder {
             let stream = match start_record_stream(
                 &device,
                 &stream_info,
-                &capture_params,
+                &capture_format,
                 producer,
                 processor,
             ) {
@@ -78,7 +85,7 @@ impl AudioRecorder {
                     return;
                 }
             };
-            capture_loop(params, consumer, sink_receiver);
+            capture_loop(ENGINE_FORMAT, consumer, sink_receiver);
             drop(stream);
         });
         init_rx.await??;
@@ -103,11 +110,13 @@ impl AudioRecorder {
 fn start_record_stream(
     device: &Device,
     stream_info: &StreamInfo,
-    capture_params: &StreamParams,
+    capture_params: &AudioFormat,
     producer: Producer<f32>,
     processor: WebrtcAudioProcessor,
 ) -> Result<cpal::Stream> {
+    info!("capture params: {capture_params:?}");
     let config = &stream_info.config;
+    processor.init_capture(config.channels as usize)?;
     let resampler = FixedResampler::new(
         NonZeroUsize::new(capture_params.channel_count as usize).unwrap(),
         capture_params.sample_rate.0,
@@ -136,7 +145,7 @@ fn start_record_stream(
 }
 
 struct CaptureState {
-    params: StreamParams,
+    params: AudioFormat,
     producer: Producer<f32>,
     processor: WebrtcAudioProcessor,
     resampler: FixedResampler<f32, 2>,
@@ -148,22 +157,28 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
     mut state: CaptureState,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let mut tick = 0;
-    let processor_frame_size = state.params.frame_buffer_size(DURATION_10MS);
-    let mut input_buf: Vec<f32> = Vec::with_capacity(processor_frame_size);
-    let mut resampled_buf: Vec<f32> = Vec::with_capacity(processor_frame_size);
     let span = trace_span!("capture-cb");
+
+    // this needs to be at 10ms = 480 samples per channel, otherwise
+    // the WebrtcAudioProcessor panics.
+    let processor_chunk_size = state.params.sample_count(DURATION_10MS);
+    let mut resampled_buf: Vec<f32> = Vec::with_capacity(processor_chunk_size);
+
+    // this will grow as needed and contains
+    let mut input_buf: Vec<f32> = Vec::with_capacity(processor_chunk_size);
+
     device.build_input_stream::<S, _, _>(
         config,
         move |data: &[S], info: &_| {
             let _guard = span.enter();
             let start = Instant::now();
-            let max_tick_time = state.params.duration_from_buffer_size(data.len());
+            let max_tick_time = state.params.duration_from_sample_count(data.len());
 
             if tick < 5 {
                 info!("record stream started. len={}", data.len());
             }
 
-            // adjust sample format
+            // adjust sample format. this needs a copy because the resampler needs a continous slice.
             input_buf.extend(data.iter().map(|s| s.to_sample()));
             // resample
             state.resampler.process_interleaved(
@@ -189,7 +204,7 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
                 .processor
                 .set_capture_delay(capture_delay + resampler_delay);
             // process
-            let mut chunks = resampled_buf.chunks_exact_mut(processor_frame_size);
+            let mut chunks = resampled_buf.chunks_exact_mut(processor_chunk_size);
             let mut pushed = 0;
             for chunk in &mut chunks {
                 state.processor.process_capture_frame(chunk).unwrap();
@@ -228,7 +243,7 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
 }
 
 fn capture_loop(
-    params: StreamParams,
+    params: AudioFormat,
     mut consumer: Consumer<f32>,
     mut sink_receiver: mpsc::Receiver<Box<dyn AudioSink>>,
 ) {
@@ -237,7 +252,7 @@ fn capture_loop(
     info!("capture loop start");
 
     let tick_duration = DURATION_20MS;
-    let frame_size = params.frame_buffer_size(tick_duration);
+    let frame_size = params.sample_count(tick_duration);
     let mut buf = vec![0.; frame_size];
     let mut sinks = vec![];
 

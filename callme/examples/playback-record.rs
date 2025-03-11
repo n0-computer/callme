@@ -81,7 +81,7 @@ async fn handle_connection(conn: RtcConnection, args: Args) -> Result<()> {
     // let file_track = build_file_track(file).await?;
     // conn.send_track(file_track).await?;
     let mut id = 0;
-    while let Ok(mut track) = conn.recv_track().await {
+    while let Some(mut track) = conn.recv_track().await? {
         info!("incoming track");
         if let Some(dir) = &args.record_dir {
             tokio::fs::create_dir_all(&dir).await?;

@@ -25,6 +25,8 @@ const DURATION_10MS: Duration = Duration::from_millis(10);
 const DURATION_20MS: Duration = Duration::from_millis(20);
 
 pub use crate::codec::opus::OPUS_STREAM_PARAMS;
+//pub use crate::codec::opus::OPUS_STREAM_PARAMS as ENGINE_FORMAT;
+pub const ENGINE_FORMAT: AudioFormat = OPUS_STREAM_PARAMS;
 
 #[derive(Debug, Clone)]
 pub struct AudioContext {
@@ -43,7 +45,7 @@ impl AudioContext {
 
     pub async fn new(config: AudioConfig) -> Result<Self> {
         let host = cpal::default_host();
-        let processor = WebrtcAudioProcessor::new(1, 1, None, config.processing_enabled)?;
+        let processor = WebrtcAudioProcessor::new(None, config.processing_enabled)?;
         let recorder =
             AudioRecorder::build(&host, config.input_device.as_deref(), processor.clone()).await?;
         let player =
@@ -67,7 +69,7 @@ impl AudioContext {
     }
 
     pub async fn feedback_raw(&self) -> Result<()> {
-        let buffer_size = OPUS_STREAM_PARAMS.frame_buffer_size(DURATION_20MS * 4);
+        let buffer_size = OPUS_STREAM_PARAMS.sample_count(DURATION_20MS * 4);
         let (sink, source) = ringbuf_pipe(buffer_size);
         self.recorder.add_sink(sink).await?;
         self.player.add_source(source).await?;
@@ -117,12 +119,12 @@ mod ringbuf_pipe {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct StreamParams {
+pub struct AudioFormat {
     pub sample_rate: SampleRate,
     pub channel_count: ChannelCount,
 }
 
-impl From<cpal::StreamConfig> for StreamParams {
+impl From<cpal::StreamConfig> for AudioFormat {
     fn from(value: cpal::StreamConfig) -> Self {
         Self {
             sample_rate: value.sample_rate,
@@ -131,25 +133,31 @@ impl From<cpal::StreamConfig> for StreamParams {
     }
 }
 
-impl StreamParams {
+impl AudioFormat {
     pub const fn new(sample_rate: SampleRate, channel_count: ChannelCount) -> Self {
         Self {
             sample_rate,
             channel_count,
         }
     }
+    pub const fn new2(sample_rate: u32, channel_count: u16) -> Self {
+        Self {
+            sample_rate: SampleRate(sample_rate),
+            channel_count,
+        }
+    }
 
-    pub fn duration_from_buffer_size(&self, buffer_size: usize) -> Duration {
+    pub fn duration_from_sample_count(&self, sample_count: usize) -> Duration {
         Duration::from_secs_f32(
-            (buffer_size as f32 / self.channel_count as f32) / self.sample_rate.0 as f32,
+            (sample_count as f32 / self.channel_count as f32) / self.sample_rate.0 as f32,
         )
     }
 
-    pub const fn frame_duration_in_samples(&self, duration: Duration) -> usize {
+    pub const fn block_count(&self, duration: Duration) -> usize {
         (self.sample_rate.0 as usize / 1000) * duration.as_millis() as usize
     }
 
-    pub const fn frame_buffer_size(&self, duration: Duration) -> usize {
-        self.frame_duration_in_samples(duration) * self.channel_count as usize
+    pub const fn sample_count(&self, duration: Duration) -> usize {
+        self.block_count(duration) * self.channel_count as usize
     }
 }
