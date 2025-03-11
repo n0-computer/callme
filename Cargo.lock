@@ -3322,7 +3322,7 @@ dependencies = [
 [[package]]
 name = "iroh-roq"
 version = "0.1.0"
-source = "git+https://github.com/Frando/iroh-roq.git?branch=fix%2Fless-logs#bc2cd3fbddf39143582ec5d7a702561775990b5e"
+source = "git+https://github.com/n0-computer/iroh-roq.git?branch=fix%2Fclose-flows#0043404fee21c450dfc811ee68e6520cac1d50c4"
 dependencies = [
  "anyhow",
  "iroh",

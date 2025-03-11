@@ -19,6 +19,7 @@ mod tests {
     use futures_concurrency::future::{Join, TryJoin};
     use iroh::protocol::Router;
     use testresult::TestResult;
+    use tokio::sync::{mpsc, oneshot};
 
     use crate::{
         audio::{AudioSink, AudioSource, OPUS_STREAM_PARAMS},
@@ -40,26 +41,40 @@ mod tests {
     #[tracing_test::traced_test]
     #[tokio::test]
     async fn smoke() -> TestResult {
-        let (r1, p1) = build().await?;
-        let (r2, p2) = build().await?;
-        let a1 = r1.endpoint().node_addr().await?;
+        let (router1, rtc1) = build().await?;
+        let (router2, rtc2) = build().await?;
+        let addr1 = router1.endpoint().node_addr().await?;
 
-        let (c1, c2) = (p2.connect(a1), p1.accept()).try_join().await?;
+        let (conn1, conn2) = (rtc2.connect(addr1), rtc1.accept()).try_join().await?;
 
-        let c2 = c2.unwrap();
+        let conn2 = conn2.unwrap();
 
-        let (mut source, track1) = MediaTrackOpusEncoder::new(4, OPUS_STREAM_PARAMS)?;
-        c1.send_track(track1.clone()).await?;
+        let (mut node1, track1) = MediaTrackOpusEncoder::new(4, OPUS_STREAM_PARAMS)?;
+        conn1.send_track(track1.clone()).await?;
 
         let sample_count = OPUS_STREAM_PARAMS.sample_count(Duration::from_millis(20));
+        // start sending audio at node1
+        let (abort_tx, mut abort_rx) = mpsc::channel(1);
         let send_task = tokio::task::spawn(async move {
-            for _i in 0..1000 {
-                source.tick(&vec![0.5; sample_count])?;
-                tokio::time::sleep(Duration::from_millis(20)).await;
+            println!("loop start");
+            let fut = async move {
+                loop {
+                    if let Err(err) = node1.tick(&vec![0.5; sample_count]) {
+                        return Err(err);
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            tokio::select! {
+                x = abort_rx.recv() => x.unwrap(),
+                x = fut => x.unwrap(),
             }
+            println!("loop end");
+            conn1.transport().close(1u32.into(), b"bye");
+            tokio::time::sleep(Duration::from_millis(20)).await;
             anyhow::Ok(())
         });
-        let track2 = c2.recv_track().await?.unwrap();
+        let track2 = conn2.recv_track().await?.unwrap();
 
         assert_eq!(track1.codec(), track2.codec());
 
@@ -68,9 +83,9 @@ mod tests {
         // we need to wait a bit likely.
         let start = Instant::now();
         // wait for some audio to arrive.
-        let expected = 1920 * 3;
+        let expected = sample_count * 3;
         let mut total = 0;
-        'outer: while total < expected {
+        'outer: loop {
             let n = loop {
                 if start.elapsed() > Duration::from_secs(2) {
                     panic!("timeout");
@@ -79,19 +94,22 @@ mod tests {
                 match decoder.tick(&mut out)? {
                     ControlFlow::Continue(0) => continue,
                     ControlFlow::Continue(n) => break n,
+                    // this signals end of track, triggered when the connection closes.
                     ControlFlow::Break(()) => break 'outer,
                 }
             };
             assert!(out[..n].iter().any(|s| *s != 0.));
             out.fill(0.);
             total += n;
+            if total >= expected {
+                abort_tx.try_send(()).ok();
+            }
             println!("received {n} audio frames, total {total}");
         }
         assert_eq!(total, expected);
-        send_task.abort();
-        // send_task.await??;
-        r1.shutdown().await?;
-        r2.shutdown().await?;
+        send_task.await??;
+        router1.shutdown().await?;
+        router2.shutdown().await?;
         Ok(())
     }
 }

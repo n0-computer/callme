@@ -9,17 +9,16 @@ repository = "https://github.com/n0-computer/callme.git"
 license = "MIT OR Apache-2.0"
 
 [patch.crates-io]
-# dial down logging:
-iroh-roq = { git = "https://github.com/Frando/iroh-roq.git", branch = "fix/less-logs" }
+# make receive flows close on connection close: https://github.com/n0-computer/iroh-roq/pull/4
+iroh-roq = { git = "https://github.com/n0-computer/iroh-roq.git", branch = "fix/close-flows" }
+
 # fix android device names: https://github.com/RustAudio/cpal/pull/959
 cpal = { git = "https://github.com/Frando/cpal.git", branch = "feat/android-device-name" }
 
 # fix android build: https://github.com/tonarino/webrtc-audio-processing/pull/47
 webrtc-audio-processing = { git = "https://github.com/Frando/webrtc-audio-processing.git", branch = "fix/android-build" }
 webrtc-audio-processing-sys = { git = "https://github.com/Frando/webrtc-audio-processing.git", branch = "fix/android-build" }
-# webrtc-audio-processing-sys = { path = "../webrtc-audio-processing/webrtc-audio-processing-sys" }
-# webrtc-audio-processing = { path = "../webrtc-audio-processing" }
-#
+
 # this is needed for compiling to wasm
 # webrtc-util = { git = "https://github.com/Frando/webrtc.git", branch = "fix/util-feature-flags" }
 

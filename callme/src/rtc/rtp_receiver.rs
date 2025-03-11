@@ -46,7 +46,7 @@ impl RtpMediaTrackReceiver {
         depacketizer: T,
         sample_rate: u32,
         first_packet: rtp::packet::Packet,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let mut sample_builder = SampleBuilder::new(16, depacketizer, sample_rate);
         let mut packet = first_packet;
         loop {
