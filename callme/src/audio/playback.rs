@@ -20,8 +20,8 @@ use tracing::{debug, error, info, trace, trace_span, warn, Level};
 
 use super::{
     device::{find_device, output_stream_config, Direction, StreamInfo},
-    processor::WebrtcAudioProcessor,
-    AudioFormat, DURATION_10MS, DURATION_20MS, ENGINE_FORMAT, OPUS_STREAM_PARAMS, SAMPLE_RATE,
+    AudioFormat, WebrtcAudioProcessor, DURATION_10MS, DURATION_20MS, ENGINE_FORMAT,
+    OPUS_STREAM_PARAMS, SAMPLE_RATE,
 };
 use crate::{
     codec::opus::MediaTrackOpusDecoder,
@@ -197,6 +197,7 @@ fn start_playback_stream(
 ) -> Result<cpal::Stream> {
     info!("playback params: {params:?}");
     let config = &stream_info.config;
+    #[cfg(feature = "audio-processing")]
     processor.init_playback(config.channels as usize)?;
     let resampler = FixedResampler::new(
         NonZeroUsize::new(params.channel_count as usize).unwrap(),
@@ -229,6 +230,7 @@ fn start_playback_stream(
 struct PlaybackState {
     params: AudioFormat,
     resampler: FixedResampler<f32, 2>,
+    #[allow(unused)]
     processor: WebrtcAudioProcessor,
     consumer: Consumer<f32>,
 }
@@ -251,17 +253,23 @@ fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Def
         config,
         move |data: &mut [S], info: &_| {
             let _guard = span.enter();
-            // if tick < 2 {
-            //     debug!("[{tick}] stream started. len={} inc={}", data.len(), state.consumer.occupied_len());
-            // }
+            let delay = {
+                let output_delay = info
+                    .timestamp()
+                    .callback
+                    .duration_since(&info.timestamp().playback)
+                    .unwrap_or_default();
+                let resampler_delay = Duration::from_secs_f32(state.resampler.output_delay() as f32 / state.params.sample_rate.0 as f32);
+                output_delay + resampler_delay
+            };
 
-            let output_delay = info
-                .timestamp()
-                .callback
-                .duration_since(&info.timestamp().playback)
-                .unwrap_or_default();
-            let resampler_delay = Duration::from_secs_f32(state.resampler.output_delay() as f32 / state.params.sample_rate.0 as f32);
-            state.processor.set_playback_delay(output_delay + resampler_delay);
+            if tick % 100 == 0 {
+                trace!("callback tick {tick} len={} delay={delay:?}", data.len());
+            }
+
+
+            #[cfg(feature = "audio-processing")]
+            state.processor.set_playback_delay(delay);
 
             // pop from channel
             unprocessed.extend(state.consumer.pop_iter());
@@ -269,6 +277,7 @@ fn build_output_stream<S: dasp_sample::FromSample<f32> + cpal::SizedSample + Def
             // process
             let mut chunks = unprocessed.chunks_exact_mut(frame_size);
             for chunk in &mut chunks {
+                #[cfg(feature = "audio-processing")]
                 state.processor.process_render_frame(chunk).unwrap();
                 processed.extend_from_slice(chunk);
             }

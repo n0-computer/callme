@@ -123,15 +123,15 @@ jobs:
 
       - name: build
         run: |
-          cargo build
+          cargo build --no-default-features
 
       - name: build tests
         run: |
-          cargo nextest run --workspace --lib --bins --tests --no-run
+          cargo nextest run --workspace --lib --bins --tests --no-run --no-default-features
 
       - name: run tests
         run: |
-          cargo nextest run --workspace --lib --bins --tests --no-fail-fast
+          cargo nextest run --workspace --lib --bins --tests --no-fail-fast --no-default-features
         env:
           RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
 
@@ -141,8 +141,8 @@ jobs:
         run: |
           cargo test --workspace --all-features --doc
 
-  build_and_test_android:
-    name: "Build and test (Android)"
+  build_android:
+    name: "Build Android APK"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

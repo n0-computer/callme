@@ -26,8 +26,8 @@ use tracing::{debug, error, info, span, trace, trace_span, warn, Level};
 
 use super::{
     device::{find_device, input_stream_config, Direction, StreamInfo},
-    processor::WebrtcAudioProcessor,
-    AudioFormat, DURATION_10MS, DURATION_20MS, ENGINE_FORMAT, OPUS_STREAM_PARAMS, SAMPLE_RATE,
+    AudioFormat, WebrtcAudioProcessor, DURATION_10MS, DURATION_20MS, ENGINE_FORMAT,
+    OPUS_STREAM_PARAMS, SAMPLE_RATE,
 };
 use crate::{
     codec::opus::MediaTrackOpusEncoder,
@@ -116,7 +116,10 @@ fn start_record_stream(
 ) -> Result<cpal::Stream> {
     info!("capture params: {capture_params:?}");
     let config = &stream_info.config;
+
+    #[cfg(feature = "audio-processing")]
     processor.init_capture(config.channels as usize)?;
+
     let resampler = FixedResampler::new(
         NonZeroUsize::new(ENGINE_FORMAT.channel_count as usize).unwrap(),
         capture_params.sample_rate.0,
@@ -147,6 +150,7 @@ fn start_record_stream(
 struct CaptureState {
     params: AudioFormat,
     producer: Producer<f32>,
+    #[allow(unused)]
     processor: WebrtcAudioProcessor,
     resampler: FixedResampler<f32, 2>,
 }
@@ -179,8 +183,23 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
             let start = Instant::now();
             let max_tick_time = state.params.duration_from_sample_count(data.len());
 
-            if tick < 5 {
-                info!("record stream started. len={}", data.len());
+            let delay = {
+                let capture_delay = info
+                    .timestamp()
+                    .callback
+                    .duration_since(&info.timestamp().capture)
+                    .unwrap_or_default();
+                let resampler_delay = Duration::from_secs_f32(
+                    state.resampler.output_delay() as f32 / ENGINE_FORMAT.sample_rate.0 as f32,
+                );
+                capture_delay + resampler_delay
+            };
+
+            if tick % 100 == 0 {
+                trace!(
+                    "record stream tick {tick} len={} delay={delay:?}",
+                    data.len(),
+                );
             }
 
             // adjust sample format and channel count.
@@ -209,21 +228,14 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
             input_buf.clear();
 
             // record delay for processor
-            let capture_delay = info
-                .timestamp()
-                .callback
-                .duration_since(&info.timestamp().capture)
-                .unwrap_or_default();
-            let resampler_delay =
-                Duration::from_secs_f32(state.resampler.output_delay() as f32 / 48_000f32);
-            // let capture_delay = capture_delay + state.resampler.output_delay();
-            state
-                .processor
-                .set_capture_delay(capture_delay + resampler_delay);
+            #[cfg(feature = "audio-processing")]
+            state.processor.set_capture_delay(delay);
+
             // process
             let mut chunks = resampled_buf.chunks_exact_mut(processor_chunk_size);
             let mut pushed = 0;
             for chunk in &mut chunks {
+                #[cfg(feature = "audio-processing")]
                 state.processor.process_capture_frame(chunk).unwrap();
                 let n = state.producer.push_slice(&chunk);
                 pushed += n;

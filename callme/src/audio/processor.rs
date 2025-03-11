@@ -30,12 +30,8 @@ struct Inner {
 }
 
 impl WebrtcAudioProcessor {
-    pub fn new(
-        echo_cancellation_suppression_level: Option<EchoCancellationSuppressionLevel>,
-        enabled: bool,
-    ) -> Result<Self> {
-        let suppression_level = echo_cancellation_suppression_level
-            .unwrap_or(EchoCancellationSuppressionLevel::Moderate);
+    pub fn new(enabled: bool) -> Result<Self> {
+        let suppression_level = EchoCancellationSuppressionLevel::Moderate;
         // High pass filter is a prerequisite to running echo cancellation.
         let config = Config {
             echo_cancellation: Some(EchoCancellation {

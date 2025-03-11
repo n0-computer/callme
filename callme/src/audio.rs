@@ -10,14 +10,20 @@ use self::{
 pub use self::{
     device::{AudioConfig, Devices, Direction},
     playback::AudioSource,
-    processor::WebrtcAudioProcessor,
     record::AudioSink,
 };
 use crate::rtc::MediaTrack;
 
+#[cfg(feature = "audio-processing")]
+mod processor;
+#[cfg(feature = "audio-processing")]
+pub use processor::WebrtcAudioProcessor;
+
+#[cfg(not(feature = "audio-processing"))]
+pub type WebrtcAudioProcessor = ();
+
 mod device;
 mod playback;
-mod processor;
 mod record;
 
 pub const SAMPLE_RATE: SampleRate = SampleRate(48_000);
@@ -45,7 +51,11 @@ impl AudioContext {
 
     pub async fn new(config: AudioConfig) -> Result<Self> {
         let host = cpal::default_host();
-        let processor = WebrtcAudioProcessor::new(None, config.processing_enabled)?;
+        #[cfg(feature = "audio-processing")]
+        let processor = WebrtcAudioProcessor::new(config.processing_enabled)?;
+        #[cfg(not(feature = "audio-processing"))]
+        let processor = ();
+
         let recorder =
             AudioRecorder::build(&host, config.input_device.as_deref(), processor.clone()).await?;
         let player =

@@ -18,7 +18,7 @@ egui = { version = "0.31.0", default-features = false, features = [
     "color-hex",
 ] }
 iroh = { version = "0.33.0", default-features = false }
-callme = { version = "0.1.0", path = "../callme" }
+callme = { version = "0.1.0", path = "../callme", default-features = false }
 n0-future = "0.1.2"
 tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "sync"] }
 tracing = "0.1.41"
@@ -58,3 +58,7 @@ upgrade-guid = "E3D6696C-AEF5-422B-AFB2-608520166A3A"
 path-guid = "F951758C-D6A4-4855-B5EE-8D14EAC48693"
 license = false
 eula = false
+
+[features]
+default = ["audio-processing"]
+audio-processing = ["callme/audio-processing"]
