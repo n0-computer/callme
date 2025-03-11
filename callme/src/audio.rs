@@ -40,7 +40,7 @@ pub struct AudioContext {
 
 impl AudioContext {
     pub async fn list_devices() -> Result<Devices> {
-        tokio::task::spawn_blocking(|| list_devices()).await?
+        tokio::task::spawn_blocking(list_devices).await?
     }
 
     pub fn list_devices_sync() -> Result<Devices> {
@@ -107,7 +107,7 @@ mod ringbuf_pipe {
 
     impl AudioSink for RingbufSink {
         fn tick(&mut self, buf: &[f32]) -> Result<ControlFlow<(), ()>> {
-            let len = self.0.push_slice(&buf);
+            let len = self.0.push_slice(buf);
             if len < buf.len() {
                 warn!("ringbuf sink xrun: failed to send {}", buf.len() - len);
             }

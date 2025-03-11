@@ -177,7 +177,7 @@ impl AppState {
         ui.heading("Accept calls");
         if let Some(node_id) = &self.our_node_id {
             ui.horizontal(|ui| {
-                ui.label(format!("Our node id:"));
+                ui.label("Our node id:".to_string());
                 ui.label(fmt_node_id(&node_id.fmt_short()));
                 if ui
                     .button("📋 Copy")
@@ -222,10 +222,8 @@ impl AppState {
                                 accept: false,
                             });
                         }
-                    } else {
-                        if ui.button("Drop").clicked() {
-                            self.cmd(Command::Abort { node_id });
-                        }
+                    } else if ui.button("Drop").clicked() {
+                        self.cmd(Command::Abort { node_id });
                     }
                 });
             }

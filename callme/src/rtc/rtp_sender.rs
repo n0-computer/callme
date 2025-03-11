@@ -75,7 +75,7 @@ impl RtpMediaTrackSender {
 
             let sample_count = sample_count
                 .ok_or_else(|| anyhow!("received media track frame without sample count"))?;
-            let packets = packetizer.packetize(&payload, sample_count as u32)?;
+            let packets = packetizer.packetize(&payload, sample_count)?;
             for packet in packets {
                 trace!(
                     "send packet len {} seq {} ts {}",

@@ -209,10 +209,10 @@ fn start_playback_stream(
         resampler,
     };
     let stream = match stream_info.sample_format {
-        SampleFormat::I8 => build_playback_stream::<i8>(&device, &config, state),
-        SampleFormat::I16 => build_playback_stream::<i16>(&device, &config, state),
-        SampleFormat::I32 => build_playback_stream::<i32>(&device, &config, state),
-        SampleFormat::F32 => build_playback_stream::<f32>(&device, &config, state),
+        SampleFormat::I8 => build_playback_stream::<i8>(device, config, state),
+        SampleFormat::I16 => build_playback_stream::<i16>(device, config, state),
+        SampleFormat::I32 => build_playback_stream::<i32>(device, config, state),
+        SampleFormat::F32 => build_playback_stream::<f32>(device, config, state),
         sample_format => {
             tracing::error!("Unsupported sample format '{sample_format}'");
             Err(cpal::BuildStreamError::StreamConfigNotSupported)
