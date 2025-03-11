@@ -21,7 +21,7 @@ use tracing::{debug, error, info, trace, trace_span, warn, Level};
 use super::{
     device::{find_device, output_stream_config, Direction, StreamInfo},
     processor::WebrtcAudioProcessor,
-    AudioFormat, DURATION_10MS, DURATION_20MS, OPUS_STREAM_PARAMS, SAMPLE_RATE,
+    AudioFormat, DURATION_10MS, DURATION_20MS, ENGINE_FORMAT, OPUS_STREAM_PARAMS, SAMPLE_RATE,
 };
 use crate::{
     codec::opus::MediaTrackOpusDecoder,
@@ -44,28 +44,34 @@ impl AudioPlayer {
         processor: WebrtcAudioProcessor,
     ) -> Result<Self> {
         let device = find_device(host, Direction::Output, device)?;
-        let stream_info = output_stream_config(&device, &OPUS_STREAM_PARAMS)?;
+        let stream_info = output_stream_config(&device, &ENGINE_FORMAT)?;
 
-        let params = AudioFormat::new(stream_info.config.sample_rate, stream_info.config.channels);
-        let buffer_size = params.sample_count(DURATION_20MS) * 32;
+        let playback_format =
+            AudioFormat::new(stream_info.config.sample_rate, stream_info.config.channels);
+        let buffer_size = ENGINE_FORMAT.sample_count(DURATION_20MS) * 32;
         let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
 
         let (source_sender, track_receiver) = mpsc::channel(16);
         let (init_tx, init_rx) = oneshot::channel();
 
         std::thread::spawn(move || {
-            let stream =
-                match start_playback_stream(&device, &stream_info, params, processor, consumer) {
-                    Ok(stream) => {
-                        init_tx.send(Ok(())).unwrap();
-                        stream
-                    }
-                    Err(err) => {
-                        init_tx.send(Err(err)).unwrap();
-                        return;
-                    }
-                };
-            playback_loop(params, producer, track_receiver);
+            let stream = match start_playback_stream(
+                &device,
+                &stream_info,
+                playback_format,
+                processor,
+                consumer,
+            ) {
+                Ok(stream) => {
+                    init_tx.send(Ok(())).unwrap();
+                    stream
+                }
+                Err(err) => {
+                    init_tx.send(Err(err)).unwrap();
+                    return;
+                }
+            };
+            playback_loop(playback_format, producer, track_receiver);
             drop(stream);
         });
 
@@ -88,7 +94,7 @@ impl AudioPlayer {
 }
 
 fn playback_loop(
-    params: AudioFormat,
+    format: AudioFormat,
     mut producer: Producer<f32>,
     mut source_receiver: mpsc::Receiver<Box<dyn AudioSource>>,
 ) {
@@ -97,20 +103,20 @@ fn playback_loop(
     info!("playback loop start");
 
     let tick_duration = DURATION_20MS;
-    let frame_size = params.sample_count(tick_duration);
+    let frame_size = format.sample_count(tick_duration);
     let mut work_buf = vec![0.; frame_size];
     let mut out_buf = vec![0.; frame_size];
     let mut sources: Vec<Box<dyn AudioSource>> = vec![];
 
     if let Err(err) = audio_thread_priority::promote_current_thread_to_real_time(
         frame_size as u32,
-        params.sample_rate.0,
+        format.sample_rate.0,
     ) {
         warn!("failed to set playback thread to realtime priority: {err:?}");
     }
 
     // todo: do we want this?
-    let initial_latency = params.sample_count(DURATION_20MS * 8);
+    let initial_latency = format.sample_count(DURATION_20MS * 8);
     let initial_silence = vec![0.; initial_latency];
     let n = producer.push_slice(&initial_silence);
     debug_assert_eq!(n, initial_silence.len());

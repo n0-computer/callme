@@ -7,8 +7,8 @@ use callme::{
     rtc::{handle_connection_with_audio_context, RtcConnection, RtcProtocol},
 };
 use eframe::NativeOptions;
-use egui::{RichText, Ui};
-use iroh::{protocol::Router, Endpoint, NodeId};
+use egui::{Color32, RichText, Ui};
+use iroh::{protocol::Router, Endpoint, KeyParsingError, NodeId};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
@@ -25,7 +25,7 @@ enum UiSection {
 
 struct AppState {
     section: UiSection,
-    remote_node_id: String,
+    remote_node_id: Option<Result<NodeId, KeyParsingError>>,
     worker: WorkerHandle,
     our_node_id: Option<NodeId>,
     devices: callme::audio::Devices,
@@ -142,28 +142,34 @@ impl AppState {
                     .clicked()
                 {
                     #[cfg(not(target_os = "android"))]
-                    {
-                        self.remote_node_id = arboard::Clipboard::new()
+                    let pasted = {
+                        arboard::Clipboard::new()
                             .expect("failed to access clipboard")
                             .get_text()
-                            .expect("failed to get text from clipboard");
-                    }
+                            .expect("failed to get text from clipboard")
+                    };
 
                     #[cfg(target_os = "android")]
-                    {
+                    let pasted = {
                         self.remote_node_id = android_clipboard::get_text()
-                            .expect("failed to get text from clipboard");
-                    }
+                            .expect("failed to get text from clipboard")
+                    };
+
+                    let node_id = NodeId::from_str(&pasted);
+                    self.remote_node_id = Some(node_id);
                 }
             });
-            if !self.remote_node_id.is_empty() {
-                ui.horizontal(|ui| {
-                    if ui.button("Call").clicked() {
-                        self.cmd(Command::Call {
-                            node_id: self.remote_node_id.clone(),
-                        });
+            if let Some(node_id) = self.remote_node_id.as_ref() {
+                ui.horizontal(|ui| match node_id {
+                    Ok(node_id) => {
+                        if ui.button("Call").clicked() {
+                            self.cmd(Command::Call { node_id: *node_id });
+                        }
+                        ui.label(fmt_node_id(&node_id.fmt_short()));
                     }
-                    ui.label(fmt_node_id(self.remote_node_id.split_at(10).0));
+                    Err(err) => {
+                        ui.label(fmt_error(&format!("Invalid node id: {err}")));
+                    }
                 });
             }
         });
@@ -296,6 +302,10 @@ fn fmt_node_id(text: &str) -> RichText {
         .family(egui::FontFamily::Monospace)
 }
 
+fn fmt_error(text: &str) -> RichText {
+    egui::RichText::new(text).color(Color32::LIGHT_RED)
+}
+
 enum Event {
     EndpointBound(NodeId),
     SetCallState(NodeId, CallState),
@@ -317,7 +327,7 @@ enum CallInfo {
 
 enum Command {
     SetAudioConfig { audio_config: AudioConfig },
-    Call { node_id: String },
+    Call { node_id: NodeId },
     HandleIncoming { node_id: NodeId, accept: bool },
     Abort { node_id: NodeId },
 }
@@ -397,7 +407,9 @@ impl Worker {
             tokio::select! {
                 command = self.command_rx.recv() => {
                     let command = command?;
-                    self.handle_command(command).await?;
+                    if let Err(err) = self.handle_command(command).await {
+                        warn!("command failed: {err}");
+                    }
                 }
                 conn = self.handler.accept() => {
                     let Some(conn) = conn? else {
@@ -456,12 +468,6 @@ impl Worker {
                 self.audio_context = Some(audio_context);
             }
             Command::Call { node_id } => {
-                let node_id = match iroh::NodeId::from_str(&node_id) {
-                    Ok(node_id) => node_id,
-                    Err(_err) => {
-                        return Ok(());
-                    }
-                };
                 if self.active_calls.contains_key(&node_id) {
                     return Ok(());
                 }

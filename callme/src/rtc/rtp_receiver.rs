@@ -19,7 +19,7 @@ impl RtpMediaTrackReceiver {
     pub async fn run(mut self) {
         if let Err(err) = self.run_inner().await {
             let id: u64 = self.recv_flow.flow_id().into();
-            warn!(%id, "rtp receive flow failed: {err:?}");
+            warn!(%id, "rtp receive flow failed: {err}");
             if let Some(tx) = self.init_tx.take() {
                 tx.send(Err(err)).ok();
             }

@@ -51,7 +51,7 @@ impl AudioRecorder {
     ) -> Result<Self> {
         let device = find_device(host, Direction::Input, device)?;
 
-        // find a config for the capture stream. note that the return config may not
+        // find a config for the capture stream. note that the returned config may not
         // match the format. the passed format is a hint as to which stream config
         // to prefer if there are multiple. if no matching format is found, the
         // device's default stream config is used.
@@ -118,9 +118,9 @@ fn start_record_stream(
     let config = &stream_info.config;
     processor.init_capture(config.channels as usize)?;
     let resampler = FixedResampler::new(
-        NonZeroUsize::new(capture_params.channel_count as usize).unwrap(),
+        NonZeroUsize::new(ENGINE_FORMAT.channel_count as usize).unwrap(),
         capture_params.sample_rate.0,
-        SAMPLE_RATE.0,
+        ENGINE_FORMAT.sample_rate.0,
         ResampleQuality::High,
         true,
     );
@@ -159,12 +159,17 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
     let mut tick = 0;
     let span = trace_span!("capture-cb");
 
+    // if we change this, code in here needs to change, so let's assert it
+    debug_assert_eq!(ENGINE_FORMAT.channel_count, 2);
+    debug_assert!(matches!(state.params.channel_count, 1 | 2));
+
     // this needs to be at 10ms = 480 samples per channel, otherwise
     // the WebrtcAudioProcessor panics.
-    let processor_chunk_size = state.params.sample_count(DURATION_10MS);
+    let processor_chunk_size = ENGINE_FORMAT.sample_count(DURATION_10MS);
     let mut resampled_buf: Vec<f32> = Vec::with_capacity(processor_chunk_size);
 
-    // this will grow as needed and contains
+    // this will grow as needed and contains samples directly from the input buf
+    // (before resampling) but with channels adjusted
     let mut input_buf: Vec<f32> = Vec::with_capacity(processor_chunk_size);
 
     device.build_input_stream::<S, _, _>(
@@ -178,8 +183,20 @@ fn build_input_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defaul
                 info!("record stream started. len={}", data.len());
             }
 
-            // adjust sample format. this needs a copy because the resampler needs a continous slice.
-            input_buf.extend(data.iter().map(|s| s.to_sample()));
+            // adjust sample format and channel count.
+            if state.params.channel_count == 1 {
+                input_buf.extend(
+                    data.iter()
+                        .map(|s| s.to_sample())
+                        .flat_map(|s| [s, s].into_iter()),
+                );
+            } else if state.params.channel_count == 2 {
+                input_buf.extend(data.iter().map(|s| s.to_sample()));
+            } else {
+                // checked above.
+                unreachable!()
+            };
+
             // resample
             state.resampler.process_interleaved(
                 &input_buf[..],

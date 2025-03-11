@@ -60,7 +60,7 @@ impl RtcConnection {
         let sender = RtpMediaTrackSender { send_flow, track };
         task::spawn(async move {
             if let Err(err) = sender.run().await {
-                warn!(flow_id, "send flow failed: {err:?}");
+                warn!(flow_id, "send flow failed: {err}");
             }
         });
         Ok(())
