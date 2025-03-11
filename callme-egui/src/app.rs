@@ -9,8 +9,8 @@ use callme::{
 use eframe::NativeOptions;
 use egui::{RichText, Ui};
 use iroh::{protocol::Router, Endpoint, NodeId};
-use n0_future::task::AbortOnDropHandle;
-use tracing::warn;
+use tokio::task::JoinSet;
+use tracing::{info, warn};
 
 const DEFAULT: &str = "<default>";
 
@@ -29,9 +29,44 @@ struct AppState {
     worker: WorkerHandle,
     our_node_id: Option<NodeId>,
     devices: callme::audio::Devices,
+    audio_config: UiAudioConfig,
+    calls: BTreeMap<NodeId, CallState>,
+}
+
+struct UiAudioConfig {
     selected_input: String,
     selected_output: String,
-    calls: BTreeMap<NodeId, CallState>,
+    processing_enabled: bool,
+}
+
+impl From<&UiAudioConfig> for AudioConfig {
+    fn from(value: &UiAudioConfig) -> Self {
+        let input_device = if value.selected_input == DEFAULT {
+            None
+        } else {
+            Some(value.selected_input.to_string())
+        };
+        let output_device = if value.selected_output == DEFAULT {
+            None
+        } else {
+            Some(value.selected_output.to_string())
+        };
+        AudioConfig {
+            input_device,
+            output_device,
+            processing_enabled: value.processing_enabled,
+        }
+    }
+}
+
+impl Default for UiAudioConfig {
+    fn default() -> Self {
+        Self {
+            selected_input: DEFAULT.to_string(),
+            selected_output: DEFAULT.to_string(),
+            processing_enabled: true,
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -63,8 +98,7 @@ impl App {
             worker: handle,
             our_node_id: None,
             devices,
-            selected_input: DEFAULT.to_string(),
-            selected_output: DEFAULT.to_string(),
+            audio_config: Default::default(),
             calls: Default::default(),
         };
 
@@ -93,22 +127,9 @@ impl AppState {
             }
         }
     }
+
     fn audio_config(&self) -> AudioConfig {
-        let input_device = if self.selected_input == DEFAULT {
-            None
-        } else {
-            Some(self.selected_input.to_string())
-        };
-        let output_device = if self.selected_output == DEFAULT {
-            None
-        } else {
-            Some(self.selected_output.to_string())
-        };
-        AudioConfig {
-            input_device,
-            output_device,
-            processing_enabled: true,
-        }
+        (&self.audio_config).into()
     }
 
     fn ui_section_call(&mut self, ui: &mut Ui) {
@@ -217,42 +238,47 @@ impl AppState {
         ui.heading("Audio config");
         ui.vertical(|ui| {
             egui::ComboBox::from_label("Capture device")
-                .selected_text(&self.selected_input)
+                .selected_text(&self.audio_config.selected_input)
                 .show_ui(ui, |ui| {
                     if ui
-                        .selectable_label(self.selected_input == DEFAULT, DEFAULT)
+                        .selectable_label(self.audio_config.selected_input == DEFAULT, DEFAULT)
                         .clicked()
                     {
-                        self.selected_input = DEFAULT.to_string();
+                        self.audio_config.selected_input = DEFAULT.to_string();
                     }
                     for device in &self.devices.input {
                         if ui
-                            .selectable_label(&self.selected_input == device, device)
+                            .selectable_label(&self.audio_config.selected_input == device, device)
                             .clicked()
                         {
-                            self.selected_input = device.to_string()
+                            self.audio_config.selected_input = device.to_string()
                         }
                     }
                 });
 
             egui::ComboBox::from_label("Playback device")
-                .selected_text(&self.selected_output)
+                .selected_text(&self.audio_config.selected_output)
                 .show_ui(ui, |ui| {
                     if ui
-                        .selectable_label(self.selected_output == DEFAULT, DEFAULT)
+                        .selectable_label(self.audio_config.selected_output == DEFAULT, DEFAULT)
                         .clicked()
                     {
-                        self.selected_output = DEFAULT.to_string();
+                        self.audio_config.selected_output = DEFAULT.to_string();
                     }
                     for device in &self.devices.output {
                         if ui
-                            .selectable_label(&self.selected_output == device, device)
+                            .selectable_label(&self.audio_config.selected_output == device, device)
                             .clicked()
                         {
-                            self.selected_output = device.to_string()
+                            self.audio_config.selected_output = device.to_string()
                         }
                     }
                 });
+
+            ui.checkbox(
+                &mut self.audio_config.processing_enabled,
+                "Enable echo cancellation",
+            );
 
             if ui.button("Save & start").clicked() {
                 let audio_config = self.audio_config();
@@ -286,7 +312,7 @@ enum CallState {
 enum CallInfo {
     Calling,
     Incoming(RtcConnection),
-    Active(RtcConnection, AbortOnDropHandle<Result<()>>),
+    Active(RtcConnection),
 }
 
 enum Command {
@@ -302,6 +328,7 @@ struct Worker {
     active_calls: BTreeMap<NodeId, CallInfo>,
     endpoint: Endpoint,
     handler: RtcProtocol,
+    tasks: JoinSet<(NodeId, Result<()>)>,
     _router: Router,
     audio_context: Option<AudioContext>,
 }
@@ -355,6 +382,7 @@ impl Worker {
             command_rx,
             event_tx,
             active_calls: Default::default(),
+            tasks: JoinSet::new(),
             endpoint,
             handler,
             _router,
@@ -377,6 +405,17 @@ impl Worker {
                     };
                     self.handle_incoming(conn).await?;
                 }
+                Some(res) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                    let (node_id, res) = res.expect("connection task panicked");
+                    if let Err(err) = res {
+                        warn!("connection with {} closed: {err:?}", node_id.fmt_short());
+                    } else {
+                        info!("connection with {} closed", node_id.fmt_short());
+                    }
+                    self.active_calls.remove(&node_id);
+                    self.emit(Event::SetCallState(node_id, CallState::Aborted))
+                        .await?;
+                }
             }
         }
         Ok(())
@@ -391,16 +430,20 @@ impl Worker {
     }
     async fn accept(&mut self, conn: RtcConnection) -> Result<()> {
         let node_id = conn.transport().remote_node_id()?;
-        let task = AbortOnDropHandle::new(tokio::task::spawn({
+        self.tasks.spawn({
             let audio_context = self
                 .audio_context
                 .clone()
                 .context("missing audio context")?;
             let conn = conn.clone();
-            async move { handle_connection_with_audio_context(audio_context, conn).await }
-        }));
-        self.active_calls
-            .insert(node_id, CallInfo::Active(conn, task));
+            async move {
+                info!("starting connection with {}", node_id.fmt_short());
+                let res = handle_connection_with_audio_context(audio_context, conn).await;
+                info!("connection with {} closed: {:?}", node_id.fmt_short(), res);
+                (node_id, res)
+            }
+        });
+        self.active_calls.insert(node_id, CallInfo::Active(conn));
         self.emit(Event::SetCallState(node_id, CallState::Active))
             .await?;
         Ok(())
@@ -447,9 +490,8 @@ impl Worker {
                 if let Some(state) = self.active_calls.remove(&node_id) {
                     match state {
                         CallInfo::Calling => {}
-                        CallInfo::Active(conn, abort_on_drop_handle) => {
+                        CallInfo::Active(conn) => {
                             conn.transport().close(0u32.into(), b"bye");
-                            drop(abort_on_drop_handle);
                         }
                         CallInfo::Incoming(conn) => {
                             conn.transport().close(0u32.into(), b"bye");
