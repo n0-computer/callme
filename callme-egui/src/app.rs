@@ -72,8 +72,9 @@ impl Default for UiAudioConfig {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.state.update();
+
+        #[cfg(target_os = "android")]
         ctx.set_pixels_per_point(4.0);
-        // ctx.style_mut(|s| s.spacing.button_padding = vec2(4.0, 4.0));
 
         #[cfg(target_os = "android")]
         egui::TopBottomPanel::top("my_panel")

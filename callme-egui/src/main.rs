@@ -10,8 +10,7 @@ fn main() -> Result<(), eframe::Error> {
     options.viewport = options
         .viewport
         .with_title("Callme")
-        .with_resizable(false)
-        .with_maximize_button(false)
+        .with_resizable(true)
         .with_inner_size([300., 300.]);
     App::run(options)
 }
