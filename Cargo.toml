@@ -16,13 +16,9 @@ iroh-roq = { git = "https://github.com/n0-computer/iroh-roq.git", branch = "fix/
 cpal = { git = "https://github.com/Frando/cpal.git", branch = "feat/android-device-name" }
 
 # fix android build: https://github.com/tonarino/webrtc-audio-processing/pull/47
-webrtc-audio-processing = { git = "https://github.com/Frando/webrtc-audio-processing.git", branch = "fix/android-build" }
-webrtc-audio-processing-sys = { git = "https://github.com/Frando/webrtc-audio-processing.git", branch = "fix/android-build" }
+# replace failure with anyhow: https://github.com/tonarino/webrtc-audio-processing/pull/48
+webrtc-audio-processing = { git = "https://github.com/Frando/webrtc-audio-processing.git", branch = "callme-dev" }
+webrtc-audio-processing-sys = { git = "https://github.com/Frando/webrtc-audio-processing.git", branch = "callme-dev" }
 
 # this is needed for compiling to wasm
 # webrtc-util = { git = "https://github.com/Frando/webrtc.git", branch = "fix/util-feature-flags" }
-
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = "thin"
