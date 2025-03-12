@@ -59,6 +59,7 @@ mod tests {
             println!("loop start");
             let fut = async move {
                 loop {
+                    #[allow(clippy::question_mark)]
                     if let Err(err) = node1.tick(&vec![0.5; sample_count]) {
                         return Err(err);
                     }
