@@ -6,6 +6,12 @@ use eframe::NativeOptions;
 
 fn main() -> Result<(), eframe::Error> {
     tracing_subscriber::fmt::init();
-    let options = NativeOptions::default();
+    let mut options = NativeOptions::default();
+    options.viewport = options
+        .viewport
+        .with_title("Callme")
+        .with_resizable(false)
+        .with_maximize_button(false)
+        .with_inner_size([300., 300.]);
     App::run(options)
 }

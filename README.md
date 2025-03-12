@@ -1,12 +1,13 @@
 # callme
 
-one-to-one audio calls using iroh and [iroh-roq](https://github.com/dignifiedquire/iroh-roq)
+Audio calls with Iroh!
 
-** beware: very work-in-progress experiment **
+`callme` is an experimental library and tool that uses [iroh-roq](https://github.com/dignifiedquire/iroh-roq) to transfer Opus-encoded audio between devices. It uses [cpal](https://github.com/RustAudio/cpal) for cross-platform access to the device's audio interfaces. It includes optional audio processing with echo cancellation, and should run on most platforms.
 
-## crates
+## Crates
 
-* **[callme](callme)** is a Rust library. It uses [cpal](https://github.com/RustAudio/cpal) to record and play audio, encodes it to opus, and transfers it with `iroh-roq`.
-* **[callme-cli](callme-cli)** is a basic command-line tool for one-to-one audio calls.
-* **[callme-egui](callme-egui)** is a (very WIP) GUI. It runs on desktop, and android! iOS maybe too. See the [README](callme-egui/README.md) for how to run it on your phone.
-* **[callme-web](callme-web)** runs callme on the web. However, it doesn't work, because [cpal doesn't support audio input in the browser, only output](https://github.com/RustAudio/cpal/issues/813)
+See the READMEs of the individual crates for usage instructions.
+
+* **[callme](callme)** is the main Rust library used by all other crates in the workspace.
+* **[callme-cli](callme-cli)** is a basic command-line tool to make audio calls.
+* **[callme-egui](callme-egui)** is a GUI for callme. It runs on desktop (Linux, macOS, WindowS) and Android. iOS support is currently untested, but should work. See the [README](callme-egui/README.md) for detailed instructions.

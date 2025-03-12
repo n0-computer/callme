@@ -75,9 +75,7 @@ impl MediaTrackOpusDecoder {
         let decoded = &self.decode_buf[..sample_count];
         // we need to upscale to two channels, AudioSource tick always expects stereo.
         match self.audio_format.channel_count {
-            1 => self
-                .audio_buf
-                .extend(decoded.iter().flat_map(|s| [s, s])),
+            1 => self.audio_buf.extend(decoded.iter().flat_map(|s| [s, s])),
             2 => self.audio_buf.extend(decoded),
             _ => unreachable!(),
         }

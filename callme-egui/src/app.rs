@@ -103,11 +103,7 @@ impl App {
         };
 
         let app = App { state };
-        eframe::run_native(
-            "egui-android-demo",
-            options,
-            Box::new(|_cc| Ok(Box::new(app))),
-        )
+        eframe::run_native("callme", options, Box::new(|_cc| Ok(Box::new(app))))
     }
 }
 impl AppState {
@@ -278,6 +274,7 @@ impl AppState {
                     }
                 });
 
+            #[cfg(feature = "audio-processing")]
             ui.checkbox(
                 &mut self.audio_config.processing_enabled,
                 "Enable echo cancellation",
