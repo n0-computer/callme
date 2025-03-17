@@ -1,7 +1,7 @@
 
 [workspace]
 resolver = "2"
-members = ["callme", "callme-cli", "callme-egui", "callme-web"]
+members = ["callme", "callme-cli", "callme-egui"]
 
 [workspace.package]
 authors = ["Frando <franz@n0.computer>", "n0 team"]
