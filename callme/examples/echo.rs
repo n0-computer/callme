@@ -4,15 +4,23 @@ use anyhow::Result;
 use callme::net::bind_endpoint;
 use clap::Parser;
 use futures_concurrency::future::TryJoin;
-use iroh::endpoint::Connecting;
+use iroh::{endpoint::Connection, NodeId};
 use iroh_roq::{Session, VarInt, ALPN};
 use n0_future::TryFutureExt;
 use tracing::{info, trace, warn};
 
 #[derive(Debug, Parser)]
 struct Args {
+    #[clap(subcommand)]
+    command: Command,
     #[clap(short, long)]
     delay: Option<u64>,
+}
+
+#[derive(Debug, Parser)]
+enum Command {
+    Connect { node_id: NodeId },
+    Accept,
 }
 
 #[tokio::main]
@@ -25,16 +33,32 @@ async fn main() -> Result<()> {
     let opts = Opts {
         delay: Duration::from_millis(args.delay.unwrap_or(200)),
     };
-    while let Some(incoming) = endpoint.accept().await {
-        let Ok(connecting) = incoming.accept() else {
-            continue;
-        };
-        let opts = opts.clone();
-        tokio::task::spawn(async move {
-            if let Err(err) = handle_connection(connecting, opts).await {
+    match args.command {
+        Command::Connect { node_id } => {
+            let conn = endpoint.connect(node_id, ALPN).await?;
+            if let Err(err) = handle_connection(conn, opts).await {
                 warn!("conn terminated with error {err:?}");
             }
-        });
+        }
+        Command::Accept => {
+            while let Some(incoming) = endpoint.accept().await {
+                let Ok(mut connecting) = incoming.accept() else {
+                    continue;
+                };
+                let opts = opts.clone();
+                tokio::task::spawn(async move {
+                    if connecting.alpn().await.ok().as_deref() != Some(ALPN) {
+                        return;
+                    }
+                    let Ok(conn) = connecting.await else {
+                        return;
+                    };
+                    if let Err(err) = handle_connection(conn, opts).await {
+                        warn!("conn terminated with error {err:?}");
+                    }
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -44,12 +68,8 @@ struct Opts {
     delay: Duration,
 }
 
-async fn handle_connection(mut connecting: Connecting, opts: Opts) -> Result<()> {
-    if connecting.alpn().await? != ALPN {
-        return Ok(());
-    }
-    let conn = connecting.await?;
-    info!("new connection from {}", conn.remote_node_id()?);
+async fn handle_connection(conn: Connection, opts: Opts) -> Result<()> {
+    info!("new connection with {}", conn.remote_node_id()?);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
 

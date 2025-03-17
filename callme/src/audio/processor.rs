@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Result;
 use dasp_sample::ToSample;
-use tracing::info;
+use tracing::{debug, info};
 use webrtc_audio_processing::{
     Config, EchoCancellation, EchoCancellationSuppressionLevel, InitializationConfig,
     NoiseSuppression, NoiseSuppressionLevel,
@@ -144,7 +144,7 @@ impl WebrtcAudioProcessor {
                     }
                 })
         {
-            info!("changing capture delay from {old_val} to {new_val}");
+            debug!("changing capture delay from {old_val} to {new_val}");
             self.update_stream_delay();
         }
     }
@@ -162,7 +162,7 @@ impl WebrtcAudioProcessor {
                     }
                 })
         {
-            info!("changing playback delay from {old_val} to {new_val}");
+            debug!("changing playback delay from {old_val} to {new_val}");
             self.update_stream_delay();
         }
     }

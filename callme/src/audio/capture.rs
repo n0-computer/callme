@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::{Bytes, BytesMut};
 use cpal::{
     traits::{DeviceTrait, StreamTrait},
@@ -25,7 +25,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, span, trace, trace_span, warn, Level};
 
 use super::{
-    device::{find_device, input_stream_config, Direction, StreamInfo},
+    device::{find_device, find_input_stream_config, Direction, StreamConfigWithFormat},
     AudioFormat, WebrtcAudioProcessor, DURATION_10MS, DURATION_20MS, ENGINE_FORMAT, SAMPLE_RATE,
 };
 use crate::{
@@ -38,27 +38,24 @@ pub trait AudioSink: Send + 'static {
 }
 
 #[derive(Debug, Clone)]
-pub struct AudioCapturer {
+pub struct AudioCapture {
     sink_sender: mpsc::Sender<Box<dyn AudioSink>>,
 }
 
-impl AudioCapturer {
+impl AudioCapture {
     pub async fn build(
         host: &cpal::Host,
         device: Option<&str>,
         processor: WebrtcAudioProcessor,
     ) -> Result<Self> {
-        let device = find_device(host, Direction::Input, device)?;
+        let device = find_device(host, Direction::Capture, device)?;
 
         // find a config for the capture stream. note that the returned config may not
         // match the format. the passed format is a hint as to which stream config
         // to prefer if there are multiple. if no matching format is found, the
         // device's default stream config is used.
-        let stream_info = input_stream_config(&device, &ENGINE_FORMAT)?;
+        let stream_config = find_input_stream_config(&device, &ENGINE_FORMAT)?;
 
-        let capture_format = AudioFormat::from(&stream_info.config);
-
-        // our ring buffer receives resampled and processed samples.
         let buffer_size = ENGINE_FORMAT.sample_count(DURATION_20MS) * 16;
         let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
 
@@ -67,18 +64,20 @@ impl AudioCapturer {
 
         let (init_tx, init_rx) = oneshot::channel();
         std::thread::spawn(move || {
-            let stream = match start_capture_stream(
-                &device,
-                &stream_info,
-                &capture_format,
-                producer,
-                processor,
+            if let Err(err) = audio_thread_priority::promote_current_thread_to_real_time(
+                buffer_size as u32,
+                ENGINE_FORMAT.sample_rate.0,
             ) {
+                warn!("failed to set capture thread to realtime priority: {err:?}");
+            }
+
+            let stream = match start_capture_stream(&device, &stream_config, producer, processor) {
                 Ok(stream) => {
                     init_tx.send(Ok(())).unwrap();
                     stream
                 }
                 Err(err) => {
+                    let err = err.context("failed to start capture stream");
                     init_tx.send(Err(err)).unwrap();
                     return;
                 }
@@ -87,7 +86,7 @@ impl AudioCapturer {
             drop(stream);
         });
         init_rx.await??;
-        let handle = AudioCapturer { sink_sender };
+        let handle = AudioCapture { sink_sender };
         Ok(handle)
     }
 
@@ -107,30 +106,32 @@ impl AudioCapturer {
 
 fn start_capture_stream(
     device: &Device,
-    stream_info: &StreamInfo,
-    format: &AudioFormat,
+    stream_config: &StreamConfigWithFormat,
     producer: Producer<f32>,
     processor: WebrtcAudioProcessor,
 ) -> Result<cpal::Stream> {
-    let config = &stream_info.config;
+    let d = device.name()?;
+    let config = &stream_config.config;
 
     #[cfg(feature = "audio-processing")]
     processor.init_capture(config.channels as usize)?;
 
+    let capture_format = stream_config.audio_format();
+
     let resampler = FixedResampler::new(
         NonZeroUsize::new(ENGINE_FORMAT.channel_count as usize).unwrap(),
-        format.sample_rate.0,
+        capture_format.sample_rate.0,
         ENGINE_FORMAT.sample_rate.0,
         ResampleQuality::High,
         true,
     );
     let state = CaptureState {
-        format: *format,
+        format: capture_format,
         producer,
         processor: processor.clone(),
         resampler,
     };
-    let stream = match stream_info.sample_format {
+    let stream = match stream_config.sample_format {
         SampleFormat::I8 => build_capture_stream::<i8>(device, config, state),
         SampleFormat::I16 => build_capture_stream::<i16>(device, config, state),
         SampleFormat::I32 => build_capture_stream::<i32>(device, config, state),
@@ -139,8 +140,9 @@ fn start_capture_stream(
             tracing::error!("Unsupported sample format '{sample_format}'");
             Err(cpal::BuildStreamError::StreamConfigNotSupported)
         }
-    }?;
-    info!("start capture stream on {} with {format:?}", device.name()?);
+    }
+    .with_context(|| format!("failed to build capture stream on {d} with {capture_format:?}"))?;
+    info!("starting capture stream on {d} with {capture_format:?}");
     stream.play()?;
     Ok(stream)
 }
@@ -194,6 +196,7 @@ fn build_capture_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defa
             };
 
             // adjust sample format and channel count.
+            // we convert to ENGINE_FORMAT here which always has two channels (asserted above).
             if state.format.channel_count == 1 {
                 input_buf.extend(
                     data.iter()
@@ -218,18 +221,20 @@ fn build_capture_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defa
             );
             input_buf.clear();
 
-            // record delay for processor
+            // update capture delay in processor
             #[cfg(feature = "audio-processing")]
             state.processor.set_capture_delay(delay);
 
-            // process
+            // process, and push processed chunks to the producer
             let mut chunks = resampled_buf.chunks_exact_mut(processor_chunk_size);
             let mut pushed = 0;
             for chunk in &mut chunks {
                 #[cfg(feature = "audio-processing")]
                 state.processor.process_capture_frame(chunk).unwrap();
+
                 let n = state.producer.push_slice(chunk);
                 pushed += n;
+
                 if n < chunk.len() {
                     warn!(
                         "record xrun: failed to push out {} of {}",
@@ -239,7 +244,8 @@ fn build_capture_stream<S: dasp_sample::ToSample<f32> + cpal::SizedSample + Defa
                     break;
                 }
             }
-            // cleanup
+
+            // cleanup: we need to keep the unprocessed samples that are still in the resampled buf
             let remainder_len = chunks.into_remainder().len();
             let end = resampled_buf.len() - remainder_len;
             resampled_buf.copy_within(end.., 0);
@@ -274,13 +280,6 @@ fn capture_loop(
     let samples_per_tick = ENGINE_FORMAT.sample_count(tick_duration);
     let mut buf = vec![0.; samples_per_tick];
     let mut sinks = vec![];
-
-    if let Err(err) = audio_thread_priority::promote_current_thread_to_real_time(
-        samples_per_tick as u32,
-        ENGINE_FORMAT.sample_rate.0,
-    ) {
-        warn!("failed to set capture thread to realtime priority: {err:?}");
-    }
 
     let mut tick = 0;
     loop {

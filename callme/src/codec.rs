@@ -38,7 +38,9 @@ impl Codec {
     }
 
     pub fn sample_rate(&self) -> u32 {
-        48_000
+        match self {
+            Codec::Opus { .. } => self::opus::OPUS_SAMPLE_RATE,
+        }
     }
 
     pub fn kind(&self) -> TrackKind {

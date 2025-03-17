@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, trace, trace_span, warn, Level};
 
 use super::{
-    device::{find_device, output_stream_config, Direction, StreamInfo},
+    device::{find_device, find_output_stream_config, Direction, StreamConfigWithFormat},
     AudioFormat, WebrtcAudioProcessor, DURATION_10MS, DURATION_20MS, ENGINE_FORMAT, SAMPLE_RATE,
 };
 use crate::{
@@ -32,34 +32,33 @@ pub trait AudioSource: Send + 'static {
 }
 
 #[derive(derive_more::Debug, Clone)]
-pub struct AudioPlayer {
+pub struct AudioPlayback {
     source_sender: mpsc::Sender<Box<dyn AudioSource>>,
 }
 
-impl AudioPlayer {
+impl AudioPlayback {
     pub async fn build(
         host: &cpal::Host,
         device: Option<&str>,
         processor: WebrtcAudioProcessor,
     ) -> Result<Self> {
-        let device = find_device(host, Direction::Output, device)?;
-        let stream_info = output_stream_config(&device, &ENGINE_FORMAT)?;
+        let device = find_device(host, Direction::Playback, device)?;
+        let stream_config = find_output_stream_config(&device, &ENGINE_FORMAT)?;
 
-        let playback_format = AudioFormat::from(&stream_info.config);
         let buffer_size = ENGINE_FORMAT.sample_count(DURATION_20MS) * 32;
         let (producer, consumer) = ringbuf::HeapRb::<f32>::new(buffer_size).split();
 
-        let (source_sender, track_receiver) = mpsc::channel(16);
+        let (source_sender, source_receiver) = mpsc::channel(16);
         let (init_tx, init_rx) = oneshot::channel();
 
         std::thread::spawn(move || {
-            let stream = match start_playback_stream(
-                &device,
-                &stream_info,
-                playback_format,
-                processor,
-                consumer,
+            if let Err(err) = audio_thread_priority::promote_current_thread_to_real_time(
+                buffer_size as u32,
+                ENGINE_FORMAT.sample_rate.0,
             ) {
+                warn!("failed to set playback thread to realtime priority: {err:?}");
+            }
+            let stream = match start_playback_stream(&device, &stream_config, processor, consumer) {
                 Ok(stream) => {
                     init_tx.send(Ok(())).unwrap();
                     stream
@@ -69,12 +68,12 @@ impl AudioPlayer {
                     return;
                 }
             };
-            playback_loop(producer, track_receiver);
+            playback_loop(producer, source_receiver);
             drop(stream);
         });
 
         init_rx.await??;
-        Ok(AudioPlayer { source_sender })
+        Ok(Self { source_sender })
     }
 
     pub async fn add_track(&self, track: MediaTrack) -> Result<()> {
@@ -104,13 +103,6 @@ fn playback_loop(
     let mut work_buf = vec![0.; buffer_size];
     let mut out_buf = vec![0.; buffer_size];
     let mut sources: Vec<Box<dyn AudioSource>> = vec![];
-
-    if let Err(err) = audio_thread_priority::promote_current_thread_to_real_time(
-        buffer_size as u32,
-        ENGINE_FORMAT.sample_rate.0,
-    ) {
-        warn!("failed to set playback thread to realtime priority: {err:?}");
-    }
 
     // todo: do we want this?
     let initial_latency = ENGINE_FORMAT.sample_count(DURATION_20MS);
@@ -187,12 +179,12 @@ fn playback_loop(
 
 fn start_playback_stream(
     device: &Device,
-    stream_info: &StreamInfo,
-    format: AudioFormat,
+    stream_config: &StreamConfigWithFormat,
     processor: WebrtcAudioProcessor,
     consumer: Consumer<f32>,
 ) -> Result<cpal::Stream> {
-    let config = &stream_info.config;
+    let config = &stream_config.config;
+    let format = stream_config.audio_format();
     #[cfg(feature = "audio-processing")]
     processor.init_playback(config.channels as usize)?;
     let resampler = FixedResampler::new(
@@ -208,7 +200,7 @@ fn start_playback_stream(
         processor,
         resampler,
     };
-    let stream = match stream_info.sample_format {
+    let stream = match stream_config.sample_format {
         SampleFormat::I8 => build_playback_stream::<i8>(device, config, state),
         SampleFormat::I16 => build_playback_stream::<i16>(device, config, state),
         SampleFormat::I32 => build_playback_stream::<i32>(device, config, state),

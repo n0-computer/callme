@@ -3,6 +3,7 @@ use iroh::{protocol::ProtocolHandler, Endpoint, NodeAddr};
 use iroh_roq::ALPN;
 use n0_future::{boxed::BoxFuture, FutureExt};
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 use super::RtcConnection;
 
@@ -18,7 +19,9 @@ impl ProtocolHandler for RtcProtocol {
     fn accept(&self, connecting: iroh::endpoint::Connecting) -> BoxFuture<Result<()>> {
         let sender = self.sender.clone();
         async move {
+            debug!("ProtocolHandler::accept: connecting");
             let conn = connecting.await?;
+            debug!("ProtocolHandler::accept: conn");
             let conn = RtcConnection::new(conn);
             sender.send(conn).await?;
             Ok(())

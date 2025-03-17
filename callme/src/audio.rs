@@ -5,7 +5,8 @@ use bytes::Bytes;
 use cpal::{ChannelCount, SampleRate};
 
 use self::{
-    capture::AudioCapturer, device::list_devices, playback::AudioPlayer, ringbuf_pipe::ringbuf_pipe,
+    capture::AudioCapture, device::list_devices, playback::AudioPlayback,
+    ringbuf_pipe::ringbuf_pipe,
 };
 pub use self::{
     capture::AudioSink,
@@ -34,8 +35,8 @@ const DURATION_20MS: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone)]
 pub struct AudioContext {
-    player: AudioPlayer,
-    recorder: AudioCapturer, // config: Arc<AudioConfig>,
+    playback: AudioPlayback,
+    capture: AudioCapture, // config: Arc<AudioConfig>,
 }
 
 impl AudioContext {
@@ -47,26 +48,28 @@ impl AudioContext {
         list_devices()
     }
 
+    /// Create a new [`AudioContext`].
     pub async fn new(config: AudioConfig) -> Result<Self> {
         let host = cpal::default_host();
+
         #[cfg(feature = "audio-processing")]
         let processor = WebrtcAudioProcessor::new(config.processing_enabled)?;
         #[cfg(not(feature = "audio-processing"))]
         let processor = ();
 
-        let recorder =
-            AudioCapturer::build(&host, config.input_device.as_deref(), processor.clone()).await?;
-        let player =
-            AudioPlayer::build(&host, config.output_device.as_deref(), processor.clone()).await?;
-        Ok(Self { player, recorder })
+        let capture =
+            AudioCapture::build(&host, config.input_device.as_deref(), processor.clone()).await?;
+        let playback =
+            AudioPlayback::build(&host, config.output_device.as_deref(), processor.clone()).await?;
+        Ok(Self { playback, capture })
     }
 
     pub async fn capture_track(&self) -> Result<MediaTrack> {
-        self.recorder.create_opus_track().await
+        self.capture.create_opus_track().await
     }
 
     pub async fn play_track(&self, track: MediaTrack) -> Result<()> {
-        self.player.add_track(track).await?;
+        self.playback.add_track(track).await?;
         Ok(())
     }
 
@@ -77,10 +80,10 @@ impl AudioContext {
     }
 
     pub async fn feedback_raw(&self) -> Result<()> {
-        let buffer_size = ENGINE_FORMAT.sample_count(DURATION_20MS * 4);
+        let buffer_size = ENGINE_FORMAT.sample_count(DURATION_20MS * 16);
         let (sink, source) = ringbuf_pipe(buffer_size);
-        self.recorder.add_sink(sink).await?;
-        self.player.add_source(source).await?;
+        self.capture.add_sink(sink).await?;
+        self.playback.add_source(source).await?;
         Ok(())
     }
 }
@@ -130,15 +133,6 @@ mod ringbuf_pipe {
 pub struct AudioFormat {
     pub sample_rate: SampleRate,
     pub channel_count: ChannelCount,
-}
-
-impl From<&cpal::StreamConfig> for AudioFormat {
-    fn from(value: &cpal::StreamConfig) -> Self {
-        Self {
-            sample_rate: value.sample_rate,
-            channel_count: value.channels,
-        }
-    }
 }
 
 impl AudioFormat {
