@@ -110,17 +110,17 @@ jobs:
           targets: ${{ matrix.cargo_targets }}
 
       - name: Install dependencies (linux)
-        if: ${{ matrix.os }} == "ubuntu-latest"
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install libasound2-dev libdbus-1-dev musl-tools -y
 
       - name: Set up Homebrew (macOS)
-        if: ${{ matrix.os }} == "macOS-latest"
+        if: matrix.os == 'macOS-latest'
         uses: Homebrew/actions/setup-homebrew@master
 
       - name: Install dependencies (macOS)
-        if: ${{ matrix.os }} == "macOS-latest"
+        if: matrix.os == 'macOS-latest'
         run: brew install automake libtool
 
       - name: Build release binary
