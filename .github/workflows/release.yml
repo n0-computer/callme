@@ -108,9 +108,21 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
           targets: ${{ matrix.cargo_targets }}
-      - name: Ensure musl support
-        if: ${{ contains(matrix.cargo_targets, '-musl') }}
-        run: sudo apt-get install musl-tools -y
+
+      - name: Install dependencies (linux)
+        if: ${{ matrix.os }} == "ubuntu-latest"
+        run: |
+          sudo apt-get update
+          sudo apt-get install libasound2-dev libdbus-1-dev musl-tools -y
+
+      - name: Set up Homebrew (macOS)
+        if: ${{ matrix.os }} == "macOS-latest"
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Install dependencies (macOS)
+        if: ${{ matrix.os }} == "macOS-latest"
+        run: brew install automake libtool
+
       - name: Build release binary
         shell: bash
         run: |
@@ -118,7 +130,12 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
             export CC=aarch64-linux-gnu-gcc
           fi
-          cargo build --verbose --release --target ${{ matrix.cargo_targets }}
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cargo build -p callme-egui --no-default-features --verbose --release --target ${{ matrix.cargo_targets }}
+          else
+            cargo build -p callme-egui --verbose --release --target ${{ matrix.cargo_targets }}
+          fi
+
       - name: Build archive
         shell: bash
         run: |
