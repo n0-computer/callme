@@ -8,7 +8,7 @@ use clap::Parser;
 use dialoguer::Confirm;
 use iroh::protocol::Router;
 use tokio::task::JoinSet;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(about = "Call me iroh", long_about = None)]
@@ -19,6 +19,7 @@ struct Args {
     /// The audio output device to use.
     #[arg(short, long)]
     output_device: Option<String>,
+    /// If set, audio processing and echo cancellation will be disabled.
     #[arg(long)]
     disable_processing: bool,
     #[clap(subcommand)]
@@ -27,14 +28,17 @@ struct Args {
 
 #[derive(Debug, Parser)]
 enum Command {
-    /// Accept a single call from a remote node.
-    Accept,
     /// Accept calls from remote nodes.
-    AcceptMany,
-    /// Make a call to a remote node.
-    Connect { node_id: NodeId },
-    /// Make a call to many remote nodes.
-    ConnectMany { node_id: Vec<NodeId> },
+    Accept {
+        /// Accept more than one call.
+        #[clap(long)]
+        many: bool,
+        /// Auto-accept calls without confirmation.
+        #[clap(long)]
+        auto: bool,
+    },
+    /// Make calls to remote nodes.
+    Connect { node_id: Vec<NodeId> },
     /// Create a debug feedback loop through an in-memory channel.
     Feedback { mode: Option<FeedbackMode> },
     /// List the available audio devices
@@ -60,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
     let mut endpoint_shutdown = None;
     let fut = async {
         match args.command {
-            Command::Accept | Command::AcceptMany => {
+            Command::Accept { many, auto } => {
                 let endpoint = net::bind_endpoint().await?;
                 let proto = RtcProtocol::new(endpoint.clone());
                 let _router = Router::builder(endpoint.clone())
@@ -74,20 +78,19 @@ async fn main() -> anyhow::Result<()> {
                 let audio_ctx = AudioContext::new(audio_config).await?;
 
                 while let Some(conn) = proto.accept().await? {
-                    match args.command {
-                        // Handle a single connection, then close.
-                        Command::Accept => {
-                            handle_connection(audio_ctx, conn).await;
-                            break;
+                    if !many {
+                        handle_connection(audio_ctx, conn).await;
+                        break;
+                    } else {
+                        let peer = conn.transport().remote_node_id()?.fmt_short();
+                        let accept =
+                            auto || confirm(format!("Incoming call from {peer}. Accept?")).await;
+                        if accept {
+                            n0_future::task::spawn(handle_connection(audio_ctx.clone(), conn));
+                        } else {
+                            info!("reject connection from {peer}");
+                            conn.transport().close(0u32.into(), b"bye");
                         }
-                        // Handle each connection after a confirm prompt. Close on Ctrl-c only.
-                        Command::AcceptMany => {
-                            let peer = conn.transport().remote_node_id()?.fmt_short();
-                            if confirm(format!("Incoming call from {peer}. Accept?")).await {
-                                tokio::task::spawn(handle_connection(audio_ctx.clone(), conn));
-                            }
-                        }
-                        _ => unreachable!(),
                     }
                 }
             }
@@ -96,33 +99,30 @@ async fn main() -> anyhow::Result<()> {
                 endpoint_shutdown = Some(endpoint.clone());
 
                 let proto = RtcProtocol::new(endpoint);
-                let conn = proto.connect(node_id).await?;
-
-                info!("established connection to {}", node_id.fmt_short());
-
-                let audio_ctx = AudioContext::new(audio_config).await?;
-                handle_connection(audio_ctx, conn).await;
-            }
-            Command::ConnectMany { node_id } => {
-                let endpoint = net::bind_endpoint().await?;
-                endpoint_shutdown = Some(endpoint.clone());
-
-                let proto = RtcProtocol::new(endpoint);
                 let audio_ctx = AudioContext::new(audio_config).await?;
 
                 let mut join_set = JoinSet::new();
+
                 for node_id in node_id {
+                    info!("connecting to {}", node_id.fmt_short());
                     let audio_ctx = audio_ctx.clone();
                     let proto = proto.clone();
                     join_set.spawn(async move {
-                        let conn = proto.connect(node_id).await?;
-                        info!("established connection to {}", node_id.fmt_short());
-                        handle_connection(audio_ctx, conn).await;
-                        anyhow::Ok(())
+                        let fut = async {
+                            let conn = proto.connect(node_id).await?;
+                            info!("established connection to {}", node_id.fmt_short());
+                            handle_connection(audio_ctx, conn).await;
+                            anyhow::Ok(())
+                        };
+                        (node_id, fut.await)
                     });
                 }
+
                 while let Some(res) = join_set.join_next().await {
-                    res??;
+                    let (node_id, res) = res.expect("task panicked");
+                    if let Err(err) = res {
+                        warn!("failed to connect to {}: {err:?}", node_id.fmt_short())
+                    }
                 }
             }
             Command::Feedback { mode } => {
