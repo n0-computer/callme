@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, str::FromStr};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_channel::{Receiver, Sender};
 use callme::{
     audio::{AudioConfig, AudioContext},
-    rtc::{handle_connection_with_audio_context, RtcConnection, RtcProtocol},
+    rtc::{MediaTrack, RtcConnection, RtcProtocol, TrackKind},
 };
 use eframe::NativeOptions;
 use egui::{Color32, RichText, Ui};
@@ -15,6 +15,7 @@ use tracing::{info, warn};
 const DEFAULT: &str = "<default>";
 
 pub struct App {
+    is_first_update: bool,
     state: AppState,
 }
 
@@ -71,20 +72,20 @@ impl Default for UiAudioConfig {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.state.update();
-
-        #[cfg(target_os = "android")]
-        ctx.set_pixels_per_point(4.0);
-
+        if self.is_first_update {
+            self.is_first_update = false;
+            ctx.set_zoom_factor(1.5);
+            let ctx = ctx.clone();
+            let callback = Box::new(move || ctx.request_repaint());
+            self.state.cmd(Command::SetUpdateCallback { callback });
+        }
+        // on android, add some space at the top.
         #[cfg(target_os = "android")]
         egui::TopBottomPanel::top("my_panel")
             .min_height(40.)
             .show(ctx, |_ui| {});
 
-        egui::CentralPanel::default().show(ctx, |ui| match self.state.section {
-            UiSection::Config => self.state.ui_section_config(ui),
-            UiSection::Main => self.state.ui_section_call(ui),
-        });
+        self.state.update(ctx);
     }
 }
 
@@ -103,13 +104,16 @@ impl App {
             calls: Default::default(),
         };
 
-        let app = App { state };
+        let app = App {
+            state,
+            is_first_update: true,
+        };
         eframe::run_native("callme", options, Box::new(|_cc| Ok(Box::new(app))))
     }
 }
 impl AppState {
-    fn update(&mut self) {
-        if let Ok(event) = self.worker.event_rx.try_recv() {
+    fn update(&mut self, ctx: &egui::Context) {
+        while let Ok(event) = self.worker.event_rx.try_recv() {
             match event {
                 Event::EndpointBound(node_id) => {
                     self.our_node_id = Some(node_id);
@@ -123,6 +127,11 @@ impl AppState {
                 }
             }
         }
+
+        egui::CentralPanel::default().show(ctx, |ui| match self.section {
+            UiSection::Config => self.ui_section_config(ui),
+            UiSection::Main => self.ui_section_call(ui),
+        });
     }
 
     fn audio_config(&self) -> AudioConfig {
@@ -309,7 +318,7 @@ enum Event {
 #[derive(strum::Display)]
 enum CallState {
     Incoming,
-    Pending,
+    Calling,
     Active,
     Aborted,
 }
@@ -320,7 +329,10 @@ enum CallInfo {
     Active(RtcConnection),
 }
 
+type UpdateCallback = Box<dyn Fn() + Send + 'static>;
+
 enum Command {
+    SetUpdateCallback { callback: UpdateCallback },
     SetAudioConfig { audio_config: AudioConfig },
     Call { node_id: NodeId },
     HandleIncoming { node_id: NodeId, accept: bool },
@@ -331,9 +343,11 @@ struct Worker {
     command_rx: Receiver<Command>,
     event_tx: Sender<Event>,
     active_calls: BTreeMap<NodeId, CallInfo>,
+    update_callback: Option<UpdateCallback>,
     endpoint: Endpoint,
     handler: RtcProtocol,
-    tasks: JoinSet<(NodeId, Result<()>)>,
+    call_tasks: JoinSet<(NodeId, Result<()>)>,
+    connect_tasks: JoinSet<(NodeId, Result<(RtcConnection, MediaTrack)>)>,
     _router: Router,
     audio_context: Option<AudioContext>,
 }
@@ -370,6 +384,9 @@ impl Worker {
 
     async fn emit(&self, event: Event) -> Result<()> {
         self.event_tx.send(event).await?;
+        if let Some(callback) = &self.update_callback {
+            callback();
+        }
         Ok(())
     }
 
@@ -387,11 +404,13 @@ impl Worker {
             command_rx,
             event_tx,
             active_calls: Default::default(),
-            tasks: JoinSet::new(),
+            call_tasks: JoinSet::new(),
+            connect_tasks: JoinSet::new(),
             endpoint,
             handler,
             _router,
             audio_context: None,
+            update_callback: None,
         })
     }
 
@@ -412,7 +431,7 @@ impl Worker {
                     };
                     self.handle_incoming(conn).await?;
                 }
-                Some(res) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                Some(res) = self.call_tasks.join_next(), if !self.call_tasks.is_empty() => {
                     let (node_id, res) = res.expect("connection task panicked");
                     if let Err(err) = res {
                         warn!("connection with {} closed: {err:?}", node_id.fmt_short());
@@ -423,6 +442,10 @@ impl Worker {
                     self.emit(Event::SetCallState(node_id, CallState::Aborted))
                         .await?;
                 }
+                Some(res) = self.connect_tasks.join_next(), if !self.connect_tasks.is_empty() => {
+                    let (node_id, res) = res.expect("connect task panicked");
+                    self.handle_connected(node_id, res).await?;
+                }
             }
         }
         Ok(())
@@ -430,34 +453,101 @@ impl Worker {
 
     async fn handle_incoming(&mut self, conn: RtcConnection) -> Result<()> {
         let node_id = conn.transport().remote_node_id()?;
+        info!("incoming connection from {}", node_id.fmt_short());
         self.active_calls.insert(node_id, CallInfo::Incoming(conn));
         self.emit(Event::SetCallState(node_id, CallState::Incoming))
             .await?;
         Ok(())
     }
-    async fn accept(&mut self, conn: RtcConnection) -> Result<()> {
-        let node_id = conn.transport().remote_node_id()?;
-        self.tasks.spawn({
-            let audio_context = self
-                .audio_context
-                .clone()
-                .context("missing audio context")?;
-            let conn = conn.clone();
-            async move {
-                info!("starting connection with {}", node_id.fmt_short());
-                let res = handle_connection_with_audio_context(audio_context, conn).await;
-                info!("connection with {} closed: {:?}", node_id.fmt_short(), res);
-                (node_id, res)
+
+    async fn handle_connected(
+        &mut self,
+        node_id: NodeId,
+        conn: Result<(RtcConnection, MediaTrack)>,
+    ) -> Result<()> {
+        match conn {
+            Ok((conn, track)) => {
+                self.accept_from_connect(conn, track).await?;
             }
-        });
-        self.active_calls.insert(node_id, CallInfo::Active(conn));
+            Err(err) => {
+                warn!("connection to {} failed: {err:?}", node_id);
+                self.active_calls.remove(&node_id);
+                self.emit(Event::SetCallState(node_id, CallState::Aborted))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn accept_from_connect(&mut self, conn: RtcConnection, track: MediaTrack) -> Result<()> {
+        let node_id = conn.transport().remote_node_id()?;
+        self.active_calls
+            .insert(node_id, CallInfo::Active(conn.clone()));
         self.emit(Event::SetCallState(node_id, CallState::Active))
             .await?;
+        let audio_context = self
+            .audio_context
+            .clone()
+            .context("missing audio context")?;
+        self.call_tasks.spawn(async move {
+            info!("starting connection with {}", node_id.fmt_short());
+            let fut = async {
+                audio_context.play_track(track).await?;
+                let capture_track = audio_context.capture_track().await?;
+                conn.send_track(capture_track).await?;
+                while let Some(_) = conn.recv_track().await? {}
+                anyhow::Ok(())
+            };
+            let res = fut.await;
+            info!("connection with {} closed: {:?}", node_id.fmt_short(), res);
+            (node_id, res)
+        });
+        Ok(())
+    }
+
+    async fn accept_from_accept(&mut self, conn: RtcConnection) -> Result<()> {
+        let node_id = conn.transport().remote_node_id()?;
+        self.active_calls
+            .insert(node_id, CallInfo::Active(conn.clone()));
+        self.emit(Event::SetCallState(node_id, CallState::Active))
+            .await?;
+        let audio_context = self
+            .audio_context
+            .clone()
+            .context("missing audio context")?;
+        self.call_tasks.spawn(async move {
+            info!("starting connection with {}", node_id.fmt_short());
+            let fut = async {
+                let capture_track = audio_context.capture_track().await?;
+                conn.send_track(capture_track).await?;
+                info!("added capture track to rtc connection");
+                while let Some(remote_track) = conn.recv_track().await? {
+                    info!(
+                        "new remote track: {:?} {:?}",
+                        remote_track.kind(),
+                        remote_track.codec()
+                    );
+                    match remote_track.kind() {
+                        TrackKind::Audio => {
+                            audio_context.play_track(remote_track).await?;
+                        }
+                        TrackKind::Video => unimplemented!(),
+                    }
+                }
+                anyhow::Ok(())
+            };
+            let res = fut.await;
+            info!("connection with {} closed: {:?}", node_id.fmt_short(), res);
+            (node_id, res)
+        });
         Ok(())
     }
 
     async fn handle_command(&mut self, command: Command) -> Result<()> {
         match command {
+            Command::SetUpdateCallback { callback } => {
+                self.update_callback = Some(callback);
+            }
             Command::SetAudioConfig { audio_config } => {
                 let audio_context = AudioContext::new(audio_config).await?;
                 self.audio_context = Some(audio_context);
@@ -467,20 +557,27 @@ impl Worker {
                     return Ok(());
                 }
                 self.active_calls.insert(node_id, CallInfo::Calling);
-                self.emit(Event::SetCallState(node_id, CallState::Pending))
+                self.emit(Event::SetCallState(node_id, CallState::Calling))
                     .await?;
 
-                let conn = self.handler.connect(node_id).await?;
-                self.accept(conn).await?;
-                self.emit(Event::SetCallState(node_id, CallState::Active))
-                    .await?;
+                let handler = self.handler.clone();
+                self.connect_tasks.spawn(async move {
+                    let fut = async {
+                        let conn = handler.connect(node_id).await?;
+                        let track = conn.recv_track().await?.ok_or_else(|| {
+                            anyhow!("connection closed without receiving a single track")
+                        })?;
+                        anyhow::Ok((conn, track))
+                    };
+                    (node_id, fut.await)
+                });
             }
             Command::HandleIncoming { node_id, accept } => {
                 let Some(CallInfo::Incoming(conn)) = self.active_calls.remove(&node_id) else {
                     return Ok(());
                 };
                 if accept {
-                    self.accept(conn).await?;
+                    self.accept_from_accept(conn).await?;
                 } else {
                     conn.transport().close(0u32.into(), b"bye");
                     self.emit(Event::SetCallState(node_id, CallState::Aborted))

@@ -11,6 +11,6 @@ fn main() -> Result<(), eframe::Error> {
         .viewport
         .with_title("Callme")
         .with_resizable(true)
-        .with_inner_size([300., 300.]);
+        .with_inner_size([500., 600.]);
     App::run(options)
 }

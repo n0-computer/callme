@@ -15,8 +15,8 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
 
     // this would setup a android logging contxt
     // however then we get duplicate logs in the default adb output
-    // use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
     // because that displays stdout/stderr already.
+    // use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
     // let subscriber = tracing_subscriber::fmt()
     //     .with_env_filter(EnvFilter::new("warn,callme=debug"))
     //     .pretty()

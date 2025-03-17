@@ -10,7 +10,7 @@ cargo run --release
 
 On Linux, you need ALSA and DBUS development headers:
 ```
-apt-get install libasound2-dev libdbus-1-dev
+apt-get install libasound2-dev libdbus-1-dev libtool automake
 ```
 
 The crate includes a C dependency for echo cancellation (`webrtc-audio-processing`) that needs C build tools to be installed.
