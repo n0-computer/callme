@@ -21,7 +21,8 @@ mod processor;
 pub use processor::WebrtcAudioProcessor;
 
 #[cfg(not(feature = "audio-processing"))]
-pub type WebrtcAudioProcessor = ();
+#[derive(Debug, Clone)]
+pub struct WebrtcAudioProcessor;
 
 mod capture;
 mod device;
@@ -36,7 +37,7 @@ const DURATION_20MS: Duration = Duration::from_millis(20);
 #[derive(Debug, Clone)]
 pub struct AudioContext {
     playback: AudioPlayback,
-    capture: AudioCapture, // config: Arc<AudioConfig>,
+    capture: AudioCapture,
 }
 
 impl AudioContext {
@@ -55,7 +56,7 @@ impl AudioContext {
         #[cfg(feature = "audio-processing")]
         let processor = WebrtcAudioProcessor::new(config.processing_enabled)?;
         #[cfg(not(feature = "audio-processing"))]
-        let processor = ();
+        let processor = WebrtcAudioProcessor;
 
         let capture =
             AudioCapture::build(&host, config.input_device.as_deref(), processor.clone()).await?;
