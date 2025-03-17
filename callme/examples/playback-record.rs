@@ -98,6 +98,7 @@ async fn handle_connection(conn: RtcConnection, args: Args) -> Result<()> {
             });
         } else {
             info!("skip track");
+            #[allow(clippy::redundant_pattern_matching)]
             tokio::task::spawn(async move { while let Ok(_) = track.recv().await {} });
         }
         id += 1;

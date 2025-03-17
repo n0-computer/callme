@@ -495,6 +495,7 @@ impl Worker {
                 audio_context.play_track(track).await?;
                 let capture_track = audio_context.capture_track().await?;
                 conn.send_track(capture_track).await?;
+                #[allow(clippy::redundant_pattern_matching)]
                 while let Some(_) = conn.recv_track().await? {}
                 anyhow::Ok(())
             };
