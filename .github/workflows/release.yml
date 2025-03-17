@@ -76,13 +76,13 @@ jobs:
           - name: ubuntu-arm-latest
             os: ubuntu-latest
             target: linux-aarch64
-            cargo_targets: "aarch64-unknown-linux-musl"
-            runner: ubuntu-24.04-arm
+            cargo_targets: "aarch64-unknown-linux-gnu"
+            runner: ubuntu-22.04-arm
           - name: ubuntu-latest
             os: ubuntu-latest
             target: linux-x86_64
-            cargo_targets: "x86_64-unknown-linux-musl"
-            runner: ubuntu-latest
+            cargo_targets: "x86_64-unknown-linux-gnu"
+            runner: ubuntu-20.04
           - name: macOS-latest
             os: macOS-latest
             target: mac-x86_64
